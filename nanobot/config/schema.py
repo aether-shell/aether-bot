@@ -29,6 +29,7 @@ class FeishuConfig(BaseModel):
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
     auto_react: bool = False  # Add reaction emoji on incoming messages
+    show_context: bool = False  # Append context status to outbound messages
 
 
 class ChannelsConfig(BaseModel):
@@ -38,6 +39,19 @@ class ChannelsConfig(BaseModel):
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
 
 
+class ContextConfig(BaseModel):
+    """Conversation context configuration."""
+    window_tokens: int = 32000
+    reserve_tokens: int = 1024
+    summarize_threshold: float = 0.75
+    hard_limit_threshold: float = 0.9
+    recent_messages: int = 20
+    min_recent_messages: int = 6
+    summary_max_tokens: int = 1200
+    summary_model: str | None = None
+    enable_native_session: bool = True
+
+
 class AgentDefaults(BaseModel):
     """Default agent configuration."""
     workspace: str = "~/.nanobot/workspace"
@@ -45,6 +59,10 @@ class AgentDefaults(BaseModel):
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
+    stream: bool = False
+    stream_min_chars: int = 120
+    stream_min_interval_s: float = 0.5
+    context: ContextConfig = Field(default_factory=ContextConfig)
 
 
 class AgentsConfig(BaseModel):

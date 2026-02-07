@@ -1,6 +1,8 @@
 """Channel manager for coordinating chat channels."""
 
 import asyncio
+import os
+import time
 from typing import Any
 
 from loguru import logger
@@ -115,11 +117,42 @@ class ChannelManager:
                     self.bus.consume_outbound(),
                     timeout=1.0
                 )
-                
+                t_send = time.monotonic()
+                trace_id = None
+                enqueued_at = None
+                if isinstance(msg.metadata, dict):
+                    trace_id = msg.metadata.get("trace_id")
+                    enqueued_at = msg.metadata.get("_enqueued_at")
+                if not trace_id:
+                    trace_id = f"{msg.channel}-{int(time.time() * 1000)}"
+
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:
                         await channel.send(msg)
+                        send_time = time.monotonic() - t_send
+                        queue_wait = None
+                        if isinstance(enqueued_at, (int, float)):
+                            queue_wait = t_send - enqueued_at
+                        slow_threshold = 3.0
+                        try:
+                            slow_threshold = float(os.getenv("NANOBOT_SEND_SLOW_S", "3"))
+                        except ValueError:
+                            slow_threshold = 3.0
+
+                        def _fmt(val: float | None) -> str:
+                            if val is None:
+                                return "n/a"
+                            return f"{val:.3f}s"
+
+                        log_line = (
+                            f"Trace {trace_id} outbound: queue_wait={_fmt(queue_wait)}, "
+                            f"send={_fmt(send_time)} channel={msg.channel}"
+                        )
+                        if send_time >= slow_threshold or (queue_wait and queue_wait >= slow_threshold):
+                            logger.info(log_line)
+                        else:
+                            logger.debug(log_line)
                     except Exception as e:
                         logger.error(f"Error sending to {msg.channel}: {e}")
                 else:

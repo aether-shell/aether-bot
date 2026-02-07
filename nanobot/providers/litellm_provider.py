@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 import litellm
@@ -89,6 +89,8 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        session_state: dict[str, Any] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -106,61 +108,116 @@ class LiteLLMProvider(LLMProvider):
         model = model or self.default_model
 
         if self._use_responses_api():
-            return await self._chat_with_responses(
+            response = await self._chat_with_responses(
                 messages=messages,
                 tools=tools,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                session_state=session_state,
+                on_delta=on_delta,
             )
-        
+            if response.finish_reason == "error" and self._should_fallback_from_responses(response.content):
+                return await self._chat_with_completions(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    session_state=session_state,
+                    on_delta=on_delta,
+                )
+            return response
+
+        return await self._chat_with_completions(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            session_state=session_state,
+            on_delta=on_delta,
+        )
+
+    async def _chat_with_completions(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        session_state: dict[str, Any] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
         # For OpenRouter, prefix model name if not already prefixed
         if self.is_openrouter and not model.startswith("openrouter/"):
             model = f"openrouter/{model}"
-        
+
         # For Zhipu/Z.ai, ensure prefix is present
         # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"
         if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
-            model.startswith("zhipu/") or 
-            model.startswith("zai/") or 
+            model.startswith("zhipu/") or
+            model.startswith("zai/") or
             model.startswith("openrouter/")
         ):
             model = f"zai/{model}"
-        
+
         # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
         # Convert openai/ prefix to hosted_vllm/ if user specified it
         if self.is_vllm:
             model = f"hosted_vllm/{model}"
-        
+
         # For Gemini, ensure gemini/ prefix if not already present
         if "gemini" in model.lower() and not model.startswith("gemini/"):
             model = f"gemini/{model}"
-        
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
         }
-        
+        if not self.drop_params:
+            kwargs["max_tokens"] = max_tokens
+            kwargs["temperature"] = temperature
+
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
             kwargs["api_base"] = self.api_base
-        
+
         if tools:
-            kwargs["tools"] = self._convert_tools_to_responses(tools)
+            kwargs["tools"] = tools
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
-        
+
         try:
+            if on_delta:
+                kwargs["stream"] = True
+                response = await acompletion(**kwargs)
+                if hasattr(response, "__aiter__"):
+                    return await self._parse_completions_stream(response, on_delta=on_delta)
+
             response = await acompletion(**kwargs)
-            return self._parse_response(response)
+            parsed = self._parse_response(response)
+            if on_delta and parsed.content:
+                await on_delta(parsed.content)
+            return parsed
         except Exception as e:
             # Return error as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
+
+    def _should_fallback_from_responses(self, content: str | None) -> bool:
+        if not self.api_base:
+            return False
+        text = (content or "").lower()
+        if "unknown error" in text:
+            return True
+        if "http 404" in text or "http 405" in text:
+            return True
+        if "not found" in text or "no route" in text:
+            return True
+        return False
 
     def _use_responses_api(self) -> bool:
         if not self.api_type:
@@ -174,6 +231,8 @@ class LiteLLMProvider(LLMProvider):
         model: str,
         max_tokens: int,
         temperature: float,
+        session_state: dict[str, Any] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         if self.api_base:
             return await self._chat_with_direct_responses(
@@ -182,6 +241,8 @@ class LiteLLMProvider(LLMProvider):
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                session_state=session_state,
+                on_delta=on_delta,
             )
 
         input_items = self._messages_to_responses_input(messages)
@@ -194,6 +255,10 @@ class LiteLLMProvider(LLMProvider):
             "custom_llm_provider": "openai",
             "stream": True,
         }
+        if session_state:
+            prev_id = session_state.get("previous_response_id")
+            if prev_id:
+                kwargs["previous_response_id"] = prev_id
 
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -207,8 +272,11 @@ class LiteLLMProvider(LLMProvider):
         try:
             response = await aresponses(**kwargs)
             if hasattr(response, "__aiter__"):
-                return await self._parse_responses_stream(response)
-            return self._parse_responses_response(response)
+                return await self._parse_responses_stream(response, on_delta=on_delta)
+            parsed = self._parse_responses_response(response)
+            if on_delta and parsed.content:
+                await on_delta(parsed.content)
+            return parsed
         except Exception as e:
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
@@ -222,6 +290,8 @@ class LiteLLMProvider(LLMProvider):
         model: str,
         max_tokens: int,
         temperature: float,
+        session_state: dict[str, Any] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         input_items = self._messages_to_responses_input(messages)
         base_body: dict[str, Any] = {
@@ -234,6 +304,10 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             base_body["tools"] = self._convert_tools_to_responses(tools)
             base_body["tool_choice"] = "auto"
+        if session_state:
+            prev_id = session_state.get("previous_response_id")
+            if prev_id:
+                base_body["previous_response_id"] = prev_id
 
         base_headers = {
             "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
@@ -244,6 +318,11 @@ class LiteLLMProvider(LLMProvider):
         base_headers = {k: v for k, v in base_headers.items() if v}
 
         urls = self._build_responses_urls()
+        if not urls:
+            return LLMResponse(
+                content="Error calling LLM: responses api_base not configured",
+                finish_reason="error",
+            )
         last_error: str | None = None
 
         try:
@@ -252,13 +331,37 @@ class LiteLLMProvider(LLMProvider):
                 client_kwargs["proxy"] = self.proxy
             async with httpx.AsyncClient(**client_kwargs) as client:
                 for url in urls:
-                    # Try non-stream first (most compatible)
+                    # If streaming is requested, try SSE first.
+                    if on_delta:
+                        stream_body = dict(base_body)
+                        stream_body["stream"] = True
+                        headers = dict(base_headers)
+                        headers["Accept"] = "text/event-stream"
+                        try:
+                            async with client.stream("POST", url, headers=headers, json=stream_body) as response:
+                                if response.status_code == 200:
+                                    return await self._consume_responses_sse(response, on_delta=on_delta)
+                                raw = await response.aread()
+                                raw_text = raw.decode("utf-8", "ignore")
+                                if response.status_code < 500:
+                                    return LLMResponse(
+                                        content=f"Error calling LLM: HTTP {response.status_code} {raw_text}",
+                                        finish_reason="error",
+                                    )
+                                last_error = f"HTTP {response.status_code} {raw_text}"
+                        except Exception as e:
+                            last_error = str(e)
+
+                    # Try non-stream (most compatible / fallback)
                     headers = dict(base_headers)
                     headers["Accept"] = "application/json"
                     try:
                         response = await client.post(url, headers=headers, json=base_body)
                         if response.status_code == 200:
-                            return self._parse_responses_response(response.json())
+                            parsed = self._parse_responses_response(response.json())
+                            if on_delta and parsed.content:
+                                await on_delta(parsed.content)
+                            return parsed
                         raw = response.text
                         if response.status_code < 500:
                             return LLMResponse(
@@ -266,26 +369,6 @@ class LiteLLMProvider(LLMProvider):
                                 finish_reason="error",
                             )
                         last_error = f"HTTP {response.status_code} {raw}"
-                    except Exception as e:
-                        last_error = str(e)
-
-                    # Retry with stream (some gateways only support SSE)
-                    stream_body = dict(base_body)
-                    stream_body["stream"] = True
-                    headers = dict(base_headers)
-                    headers["Accept"] = "text/event-stream"
-                    try:
-                        async with client.stream("POST", url, headers=headers, json=stream_body) as response:
-                            if response.status_code == 200:
-                                return await self._consume_responses_sse(response)
-                            raw = await response.aread()
-                            raw_text = raw.decode("utf-8", "ignore")
-                            if response.status_code < 500:
-                                return LLMResponse(
-                                    content=f"Error calling LLM: HTTP {response.status_code} {raw_text}",
-                                    finish_reason="error",
-                                )
-                            last_error = f"HTTP {response.status_code} {raw_text}"
                     except Exception as e:
                         last_error = str(e)
 
@@ -303,12 +386,30 @@ class LiteLLMProvider(LLMProvider):
         if not self.api_base:
             return []
         base = self.api_base.rstrip("/")
-        urls = [base if base.endswith("/responses") else base + "/responses"]
+        urls: list[str] = []
+
+        def add(url: str) -> None:
+            if url not in urls:
+                urls.append(url)
+
+        if base.endswith("/responses"):
+            add(base)
+            return urls
+
         if base.endswith("/v1"):
-            urls.append(base[:-3] + "/responses")
+            add(base + "/responses")
+            add(base[:-3] + "/responses")
+            return urls
+
+        add(base + "/responses")
+        add(base + "/v1/responses")
         return urls
 
-    async def _consume_responses_sse(self, response: httpx.Response) -> LLMResponse:
+    async def _consume_responses_sse(
+        self,
+        response: httpx.Response,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
         content_parts: list[str] = []
         completed_response: dict[str, Any] | None = None
 
@@ -317,6 +418,8 @@ class LiteLLMProvider(LLMProvider):
             if event_type == "response.output_text.delta":
                 delta = event.get("delta") or ""
                 if delta:
+                    if on_delta:
+                        await on_delta(delta)
                     content_parts.append(delta)
             elif event_type == "response.completed":
                 completed_response = event.get("response")
@@ -348,13 +451,19 @@ class LiteLLMProvider(LLMProvider):
                 continue
             buffer.append(line)
 
-    async def _parse_responses_stream(self, stream: Any) -> LLMResponse:
+    async def _parse_responses_stream(
+        self,
+        stream: Any,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
         content_parts: list[str] = []
         async for event in stream:
             event_type = self._get_event_type(event)
             if event_type == "response.output_text.delta":
                 delta = self._get_event_value(event, "delta")
                 if delta:
+                    if on_delta:
+                        await on_delta(delta)
                     content_parts.append(delta)
 
         completed = getattr(stream, "completed_response", None)
@@ -367,6 +476,61 @@ class LiteLLMProvider(LLMProvider):
         return LLMResponse(
             content=content,
             finish_reason="stop",
+        )
+
+    async def _parse_completions_stream(
+        self,
+        stream: Any,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
+        content_parts: list[str] = []
+        tool_calls: list[ToolCallRequest] = []
+        finish_reason = "stop"
+
+        async for chunk in stream:
+            try:
+                choice = chunk.choices[0]
+                finish_reason = choice.finish_reason or finish_reason
+                delta = getattr(choice, "delta", None)
+                if not delta:
+                    continue
+
+                text = getattr(delta, "content", None)
+                if text:
+                    if on_delta:
+                        await on_delta(text)
+                    content_parts.append(text)
+
+                # Some providers may stream tool_calls; best-effort support.
+                tc_list = getattr(delta, "tool_calls", None)
+                if tc_list:
+                    for tc in tc_list:
+                        func = getattr(tc, "function", None)
+                        if not func:
+                            continue
+                        name = getattr(func, "name", None)
+                        args = getattr(func, "arguments", None)
+                        if not name:
+                            continue
+                        if isinstance(args, str):
+                            try:
+                                parsed_args = json.loads(args)
+                            except json.JSONDecodeError:
+                                parsed_args = {"raw": args}
+                        else:
+                            parsed_args = args
+                        tool_calls.append(ToolCallRequest(
+                            id=getattr(tc, "id", "") or "",
+                            name=name,
+                            arguments=parsed_args or {},
+                        ))
+            except Exception:
+                continue
+
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     def _get_event_type(self, event: Any) -> str | None:
@@ -410,12 +574,24 @@ class LiteLLMProvider(LLMProvider):
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
-        
+
+        response_id = getattr(response, "id", None)
+        model = getattr(response, "model", None)
+        conversation_id = None
+        if isinstance(response, dict):
+            response_id = response.get("id") or response_id
+            model = response.get("model") or model
+            conversation = response.get("conversation") or {}
+            conversation_id = response.get("conversation_id") or conversation.get("id")
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
+            response_id=response_id,
+            conversation_id=conversation_id,
+            model=model,
         )
 
     def _parse_responses_response(self, response: Any) -> LLMResponse:
@@ -467,6 +643,22 @@ class LiteLLMProvider(LLMProvider):
                 "total_tokens": response.usage.total_tokens,
             }
 
+        response_id = None
+        model = None
+        conversation_id = None
+        if isinstance(response, dict):
+            response_id = response.get("id")
+            model = response.get("model")
+            conversation = response.get("conversation") or {}
+            conversation_id = response.get("conversation_id") or conversation.get("id")
+        else:
+            response_id = getattr(response, "id", None)
+            model = getattr(response, "model", None)
+            conversation_id = getattr(response, "conversation_id", None)
+            conv_obj = getattr(response, "conversation", None)
+            if not conversation_id and isinstance(conv_obj, dict):
+                conversation_id = conv_obj.get("id")
+
         finish_reason = "stop"
         status = getattr(response, "status", None)
         if status and status != "completed":
@@ -477,6 +669,9 @@ class LiteLLMProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            response_id=response_id,
+            conversation_id=conversation_id,
+            model=model,
         )
 
     def _extract_output_text(self, output_items: list[Any]) -> str:
@@ -709,3 +904,7 @@ class LiteLLMProvider(LLMProvider):
     def get_default_model(self) -> str:
         """Get the default model."""
         return self.default_model
+
+    def supports_native_session(self) -> bool:
+        """Return True when using Responses API with previous_response_id support."""
+        return self._use_responses_api()

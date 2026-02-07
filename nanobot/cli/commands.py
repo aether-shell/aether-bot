@@ -217,6 +217,10 @@ def gateway(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
+        stream=config.agents.defaults.stream,
+        stream_min_chars=config.agents.defaults.stream_min_chars,
+        stream_min_interval_s=config.agents.defaults.stream_min_interval_s,
+        context_config=config.agents.defaults.context,
     )
     
     # Set cron callback (needs agent)
@@ -293,6 +297,7 @@ def gateway(
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
+    show_context: bool = typer.Option(False, "--show-context", help="Show context mode and token estimates"),
 ):
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config
@@ -332,13 +337,28 @@ def agent(
         workspace=config.workspace_path,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
+        stream=config.agents.defaults.stream,
+        stream_min_chars=config.agents.defaults.stream_min_chars,
+        stream_min_interval_s=config.agents.defaults.stream_min_interval_s,
+        context_config=config.agents.defaults.context,
     )
     
     if message:
         # Single message mode
         async def run_once():
-            response = await agent_loop.process_direct(message, session_id)
-            console.print(f"\n{__logo__} {response}")
+            response = await agent_loop.process_direct(message, session_id, return_message=show_context)
+            if show_context and response is not None:
+                out = response.content
+                meta = response.metadata or {}
+                ctx_line = (
+                    f"[dim]context mode={meta.get('_context_mode')} "
+                    f"est_tokens={meta.get('_context_est_tokens')} "
+                    f"ratio={meta.get('_context_est_ratio')} "
+                    f"summarized={meta.get('_context_summarized', False)}[/dim]"
+                )
+                console.print(f"\n{__logo__} {out}\n{ctx_line}")
+            else:
+                console.print(f"\n{__logo__} {response}")
         
         asyncio.run(run_once())
     else:
@@ -352,8 +372,19 @@ def agent(
                     if not user_input.strip():
                         continue
                     
-                    response = await agent_loop.process_direct(user_input, session_id)
-                    console.print(f"\n{__logo__} {response}\n")
+                    response = await agent_loop.process_direct(user_input, session_id, return_message=show_context)
+                    if show_context and response is not None:
+                        out = response.content
+                        meta = response.metadata or {}
+                        ctx_line = (
+                            f"[dim]context mode={meta.get('_context_mode')} "
+                            f"est_tokens={meta.get('_context_est_tokens')} "
+                            f"ratio={meta.get('_context_est_ratio')} "
+                            f"summarized={meta.get('_context_summarized', False)}[/dim]"
+                        )
+                        console.print(f"\n{__logo__} {out}\n{ctx_line}\n")
+                    else:
+                        console.print(f"\n{__logo__} {response}\n")
                 except KeyboardInterrupt:
                     console.print("\nGoodbye!")
                     break

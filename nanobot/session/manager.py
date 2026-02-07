@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.utils.helpers import ensure_dir, safe_filename
+from nanobot.utils.helpers import ensure_dir, safe_filename, get_sessions_path
 
 
 @dataclass
@@ -68,7 +68,39 @@ class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
+        self._active_index_path = get_sessions_path() / "active.json"
+        self._active_sessions: dict[str, str] = {}
+        self._load_active_index()
         self._cache: dict[str, Session] = {}
+
+    def _load_active_index(self) -> None:
+        if not self._active_index_path.exists():
+            return
+        try:
+            with open(self._active_index_path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._active_sessions = {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            logger.warning(f"Failed to load session index: {e}")
+
+    def _save_active_index(self) -> None:
+        try:
+            with open(self._active_index_path, "w") as f:
+                json.dump(self._active_sessions, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save session index: {e}")
+
+    def _make_session_key(self, base_key: str) -> str:
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return f"{base_key}#{stamp}"
+
+    def _get_active_key(self, base_key: str) -> str | None:
+        return self._active_sessions.get(base_key)
+
+    def _set_active_key(self, base_key: str, session_key: str) -> None:
+        self._active_sessions[base_key] = session_key
+        self._save_active_index()
     
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -85,16 +117,39 @@ class SessionManager:
         Returns:
             The session.
         """
-        # Check cache
-        if key in self._cache:
-            return self._cache[key]
-        
-        # Try to load from disk
-        session = self._load(key)
-        if session is None:
-            session = Session(key=key)
-        
-        self._cache[key] = session
+        # Check cache for active session
+        active_key = self._get_active_key(key)
+        if active_key and active_key in self._cache:
+            return self._cache[active_key]
+
+        # Resolve active session from disk or create
+        if active_key:
+            session = self._load(active_key)
+            if session is None:
+                session = Session(key=active_key)
+            self._cache[active_key] = session
+            return session
+
+        # Backward compatibility: if base session file exists, use it
+        legacy = self._load(key)
+        if legacy is not None:
+            self._set_active_key(key, key)
+            self._cache[key] = legacy
+            return legacy
+
+        # Create a new session for this base key
+        new_key = self._make_session_key(key)
+        session = Session(key=new_key)
+        self._set_active_key(key, new_key)
+        self._cache[new_key] = session
+        return session
+
+    def start_new(self, base_key: str) -> Session:
+        """Create and activate a new session for a base key."""
+        new_key = self._make_session_key(base_key)
+        session = Session(key=new_key)
+        self._set_active_key(base_key, new_key)
+        self._cache[new_key] = session
         return session
     
     def _load(self, key: str) -> Session | None:
@@ -165,6 +220,15 @@ class SessionManager:
         """
         # Remove from cache
         self._cache.pop(key, None)
+        # Remove active pointer if needed
+        base_to_remove = None
+        for base_key, active_key in self._active_sessions.items():
+            if active_key == key:
+                base_to_remove = base_key
+                break
+        if base_to_remove:
+            self._active_sessions.pop(base_to_remove, None)
+            self._save_active_index()
         
         # Remove file
         path = self._get_session_path(key)

@@ -34,7 +34,7 @@ class MessageTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Send a message to the user. Use this when you want to communicate something."
+        return "Send a message to the user, optionally with attachments (media)."
     
     @property
     def parameters(self) -> dict[str, Any]:
@@ -44,6 +44,11 @@ class MessageTool(Tool):
                 "content": {
                     "type": "string",
                     "description": "The message content to send"
+                },
+                "media": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional: file paths or URLs to send as attachments"
                 },
                 "channel": {
                     "type": "string",
@@ -60,6 +65,7 @@ class MessageTool(Tool):
     async def execute(
         self, 
         content: str, 
+        media: list[str] | None = None,
         channel: str | None = None, 
         chat_id: str | None = None,
         **kwargs: Any
@@ -76,7 +82,8 @@ class MessageTool(Tool):
         msg = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=content
+            content=content,
+            media=media or []
         )
         
         try:
