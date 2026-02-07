@@ -80,7 +80,14 @@ class SessionManager:
             with open(self._active_index_path) as f:
                 data = json.load(f)
             if isinstance(data, dict):
+                old = dict(self._active_sessions)
                 self._active_sessions = {str(k): str(v) for k, v in data.items()}
+                # Log changes for debugging session switch issues
+                for k in set(list(old.keys()) + list(self._active_sessions.keys())):
+                    ov = old.get(k)
+                    nv = self._active_sessions.get(k)
+                    if ov != nv:
+                        logger.debug(f"active_index changed: {k}: {ov} -> {nv}")
         except Exception as e:
             logger.warning(f"Failed to load session index: {e}")
 
@@ -99,7 +106,10 @@ class SessionManager:
         return self._active_sessions.get(base_key)
 
     def _set_active_key(self, base_key: str, session_key: str) -> None:
+        old = self._active_sessions.get(base_key)
         self._active_sessions[base_key] = session_key
+        if old != session_key:
+            logger.debug(f"_set_active_key: {base_key}: {old} -> {session_key}")
         self._save_active_index()
     
     def _get_session_path(self, key: str) -> Path:
@@ -110,24 +120,55 @@ class SessionManager:
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
-        
+
+        Reloads active.json each time to pick up external changes
+        (e.g. web channel switching sessions).
+
+        If the key contains '#' it is treated as a direct session key
+        (e.g. "web:chat_id:default#20260208000954") and resolved without
+        relying on the active index.
+
         Args:
-            key: Session key (usually channel:chat_id).
-        
+            key: Session key (usually channel:chat_id or direct key with #).
+
         Returns:
             The session.
         """
+        # Direct session key (contains #timestamp) — resolve without active index
+        if "#" in key:
+            if key in self._cache:
+                logger.debug(f"get_or_create direct hit cache: {key}")
+                return self._cache[key]
+            session = self._load(key)
+            if session is not None:
+                self._cache[key] = session
+                logger.debug(f"get_or_create direct loaded: {key} msgs={len(session.messages)}")
+                return session
+            # File doesn't exist yet — create it
+            session = Session(key=key)
+            self._cache[key] = session
+            logger.debug(f"get_or_create direct created: {key}")
+            return session
+
+        # Base key — reload active index to pick up external changes
+        self._load_active_index()
+
         # Check cache for active session
         active_key = self._get_active_key(key)
+        logger.debug(
+            f"get_or_create key={key} active_key={active_key} "
+            f"cached={active_key in self._cache if active_key else 'n/a'}"
+        )
         if active_key and active_key in self._cache:
             return self._cache[active_key]
 
-        # Resolve active session from disk or create
+        # Active key changed or not cached — load from disk
         if active_key:
             session = self._load(active_key)
             if session is None:
                 session = Session(key=active_key)
             self._cache[active_key] = session
+            logger.debug(f"get_or_create loaded from disk: {active_key} msgs={len(session.messages)}")
             return session
 
         # Backward compatibility: if base session file exists, use it

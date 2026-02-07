@@ -294,9 +294,65 @@ class AgentLoop:
         final_streamed = False
         llm_total = 0.0
         tool_total = 0.0
-        
+
         last_response = None
         native_mode = ctx_stats.get("mode") == "native"
+
+        # Native session recovery: if first LLM call in native mode fails,
+        # clear stale previous_response_id and retry with full context (reset mode).
+        if native_mode:
+            t_llm = time.monotonic()
+            first_response = await self.provider.chat(
+                messages=messages,
+                tools=self.tools.get_definitions(),
+                model=self.model,
+                session_state=session_state,
+                on_delta=None,  # No streaming on probe
+            )
+            llm_time = time.monotonic() - t_llm
+            llm_total += llm_time
+
+            if first_response.finish_reason == "error":
+                logger.warning(
+                    f"Trace {trace_id} native session failed, resetting: "
+                    f"{first_response.content[:200]}"
+                )
+                # Clear stale session state and rebuild context as reset
+                llm_meta = session.metadata.setdefault("llm_session", {})
+                llm_meta["previous_response_id"] = None
+                llm_meta["pending_reset"] = False
+
+                ctx_bundle = await self.context_manager.build_context(
+                    session=session,
+                    current_message=msg.content,
+                    media=msg.media if msg.media else None,
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                )
+                messages = ctx_bundle.messages
+                session_state = ctx_bundle.session_state
+                ctx_stats = ctx_bundle.stats
+                native_mode = ctx_stats.get("mode") == "native"
+            else:
+                # First call succeeded — feed it into the normal loop
+                last_response = first_response
+                if first_response.has_tool_calls:
+                    if first_response.response_id:
+                        session_state = {"previous_response_id": first_response.response_id}
+                    messages = []
+                    for tool_call in first_response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                        t_tool = time.monotonic()
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                        tool_total += time.monotonic() - t_tool
+                    iteration = 1  # Count this as first iteration
+                else:
+                    final_content = first_response.content
+                    iteration = self.max_iterations  # Skip main loop
 
         while iteration < self.max_iterations:
             iteration += 1

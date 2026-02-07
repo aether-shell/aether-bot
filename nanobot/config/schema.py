@@ -50,6 +50,8 @@ class WebChannelConfig(BaseModel):
     token_expiry_days: int = 30
     rate_limit_rpm: int = 20
     allow_from: list[str] = Field(default_factory=list)
+    show_context: bool = False  # Show context status (mode/tokens/ratio) in messages
+    max_upload_mb: int = 10  # Max file upload size in MB
 
 
 class ChannelsConfig(BaseModel):
