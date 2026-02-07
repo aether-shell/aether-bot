@@ -41,12 +41,24 @@ class DiscordConfig(BaseModel):
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
 
 
+class WebChannelConfig(BaseModel):
+    """Web/PWA channel configuration."""
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8080
+    secret: str = ""  # Invite code / JWT secret
+    token_expiry_days: int = 30
+    rate_limit_rpm: int = 20
+    allow_from: list[str] = Field(default_factory=list)
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    web: WebChannelConfig = Field(default_factory=WebChannelConfig)
 
 
 class ContextConfig(BaseModel):

@@ -79,6 +79,17 @@ class ChannelManager:
                 logger.info("Feishu channel enabled")
             except ImportError as e:
                 logger.warning(f"Feishu channel not available: {e}")
+
+        # Web/PWA channel
+        if self.config.channels.web.enabled:
+            try:
+                from nanobot_web.channel import HTTPChannel
+                self.channels["web"] = HTTPChannel(
+                    self.config.channels.web, self.bus
+                )
+                logger.info("Web channel enabled")
+            except ImportError as e:
+                logger.warning(f"Web channel not available: {e}. Install nanobot-web package.")
     
     async def start_all(self) -> None:
         """Start WhatsApp channel and the outbound dispatcher."""
