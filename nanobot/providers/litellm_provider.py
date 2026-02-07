@@ -1,13 +1,17 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 from typing import Any, Awaitable, Callable
 
 import httpx
 import litellm
+
+logger = logging.getLogger(__name__)
 from litellm import acompletion, aresponses
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -89,9 +93,10 @@ class LiteLLMProvider(LLMProvider):
             litellm.api_base = api_base
 
         if proxy:
-            os.environ["HTTP_PROXY"] = proxy
-            os.environ["HTTPS_PROXY"] = proxy
-            os.environ.setdefault("ALL_PROXY", proxy)
+            # Only set env vars if not already present, to avoid breaking
+            # other components (e.g. Feishu WebSocket) that don't need proxy.
+            # The proxy is passed directly to httpx client in _chat_with_direct_responses.
+            pass
         
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
@@ -339,16 +344,28 @@ class LiteLLMProvider(LLMProvider):
                 content="Error calling LLM: responses api_base not configured",
                 finish_reason="error",
             )
-        last_error: str | None = None
 
-        try:
-            client_kwargs: dict[str, Any] = {"timeout": 60.0}
-            if self.proxy:
-                client_kwargs["proxy"] = self.proxy
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                for url in urls:
-                    # If streaming is requested, try SSE first.
-                    if on_delta:
+        logger.debug(
+            "Responses API request: urls=%s, headers=%s, body_keys=%s, body_size=%d",
+            urls, list(base_headers.keys()),
+            list(base_body.keys()),
+            len(json.dumps(base_body, ensure_ascii=False)),
+        )
+
+        max_retries = 3
+        retry_delays = [2, 5, 10]  # seconds between retries
+
+        for attempt in range(max_retries + 1):
+            last_error: str | None = None
+            is_retryable = False
+
+            try:
+                client_kwargs: dict[str, Any] = {"timeout": 120.0}
+                if self.proxy:
+                    client_kwargs["proxy"] = self.proxy
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    for url in urls:
+                        # Always prefer streaming to avoid Cloudflare 502 on long responses
                         stream_body = dict(base_body)
                         stream_body["stream"] = True
                         headers = dict(base_headers)
@@ -364,37 +381,55 @@ class LiteLLMProvider(LLMProvider):
                                         content=f"Error calling LLM: HTTP {response.status_code} {raw_text}",
                                         finish_reason="error",
                                     )
-                                last_error = f"HTTP {response.status_code} {raw_text}"
+                                last_error = f"HTTP {response.status_code} {raw_text[:200]}"
+                                is_retryable = True
+                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+                            last_error = str(e)
+                            is_retryable = True
                         except Exception as e:
                             last_error = str(e)
 
-                    # Try non-stream (most compatible / fallback)
-                    headers = dict(base_headers)
-                    headers["Accept"] = "application/json"
-                    try:
-                        response = await client.post(url, headers=headers, json=base_body)
-                        if response.status_code == 200:
-                            parsed = self._parse_responses_response(response.json())
-                            if on_delta and parsed.content:
-                                await on_delta(parsed.content)
-                            return parsed
-                        raw = response.text
-                        if response.status_code < 500:
-                            return LLMResponse(
-                                content=f"Error calling LLM: HTTP {response.status_code} {raw}",
-                                finish_reason="error",
-                            )
-                        last_error = f"HTTP {response.status_code} {raw}"
-                    except Exception as e:
-                        last_error = str(e)
+                        # Fallback: non-stream (for servers that don't support SSE)
+                        headers = dict(base_headers)
+                        headers["Accept"] = "application/json"
+                        try:
+                            response = await client.post(url, headers=headers, json=base_body)
+                            if response.status_code == 200:
+                                parsed = self._parse_responses_response(response.json())
+                                if on_delta and parsed.content:
+                                    await on_delta(parsed.content)
+                                return parsed
+                            raw = response.text
+                            if response.status_code < 500:
+                                return LLMResponse(
+                                    content=f"Error calling LLM: HTTP {response.status_code} {raw}",
+                                    finish_reason="error",
+                                )
+                            last_error = f"HTTP {response.status_code} {raw[:200]}"
+                            is_retryable = True
+                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+                            last_error = str(e)
+                            is_retryable = True
+                        except Exception as e:
+                            last_error = str(e)
 
+            except Exception as e:
+                last_error = str(e)
+                is_retryable = True
+
+            # Retry if it's a retryable error and we have attempts left
+            if is_retryable and attempt < max_retries:
+                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                logger.warning(
+                    "LLM request failed (attempt %d/%d): %s — retrying in %ds",
+                    attempt + 1, max_retries + 1, last_error, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            # No more retries
             return LLMResponse(
                 content=f"Error calling LLM: {last_error or 'unknown error'}",
-                finish_reason="error",
-            )
-        except Exception as e:
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
 

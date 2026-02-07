@@ -77,6 +77,19 @@ class ContextManager:
         pending_reset = bool(llm_meta.get("pending_reset"))
         if summarized and native_ready:
             pending_reset = True
+
+        bootstrap_fingerprint = self.builder.get_bootstrap_fingerprint()
+        stored_fingerprint = llm_meta.get("bootstrap_fingerprint")
+        needs_bootstrap_reset = False
+        if native_ready:
+            if stored_fingerprint is None and llm_meta.get("previous_response_id"):
+                needs_bootstrap_reset = True
+            elif stored_fingerprint and stored_fingerprint != bootstrap_fingerprint:
+                needs_bootstrap_reset = True
+        if needs_bootstrap_reset:
+            pending_reset = True
+            llm_meta["pending_reset"] = True
+        llm_meta["bootstrap_fingerprint"] = bootstrap_fingerprint
         last_ratio = float(llm_meta.get("last_context_ratio") or 0.0)
         force_reset = pending_reset or (last_ratio >= self.config.hard_limit_threshold)
 

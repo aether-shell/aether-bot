@@ -1,6 +1,7 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import hashlib
 import mimetypes
 import platform
 from pathlib import Path
@@ -130,6 +131,29 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
                     parts.append(f"## {filename}\n\n{content}")
         
         return "\n\n".join(parts) if parts else ""
+
+    def get_bootstrap_fingerprint(self) -> str:
+        """Return a fingerprint of bootstrap files to detect changes."""
+        agents_path = self.workspace / "AGENTS.md"
+        if not agents_path.exists():
+            raise FileNotFoundError(
+                f"AGENTS.md is required but was not found at {agents_path}"
+            )
+
+        hasher = hashlib.sha256()
+        for filename in self.BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if not file_path.exists():
+                continue
+            hasher.update(filename.encode("utf-8"))
+            hasher.update(b"\0")
+            try:
+                hasher.update(file_path.read_bytes())
+            except Exception:
+                hasher.update(file_path.read_text(encoding="utf-8").encode("utf-8"))
+            hasher.update(b"\0")
+
+        return hasher.hexdigest()
 
     def build_messages(
         self,
