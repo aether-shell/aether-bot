@@ -19,3 +19,4 @@ poetry.lock
 .pytest_cache/
 .DS_Store
 **/.DS_Store
+monitor_llm.log
