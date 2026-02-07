@@ -34,6 +34,7 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             with open(path) as f:
                 data = json.load(f)
+            data = _migrate_config(data)
             return Config.model_validate(convert_keys(data))
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
@@ -61,13 +62,23 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         json.dump(data, f, indent=2)
 
 
+def _migrate_config(data: dict) -> dict:
+    """Migrate old config formats to current."""
+    # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
+    tools = data.get("tools", {})
+    exec_cfg = tools.get("exec", {})
+    if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
+        tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+    return data
+
+
 def convert_keys(data: Any) -> Any:
     """Convert camelCase keys to snake_case for Pydantic."""
     if isinstance(data, dict):
         converted: dict[str, Any] = {}
         for k, v in data.items():
             snake_key = camel_to_snake(k)
-            if snake_key == "headers" and isinstance(v, dict):
+            if snake_key in {"headers", "extra_headers"} and isinstance(v, dict):
                 # Preserve header keys as-is (case and punctuation matter)
                 converted[snake_key] = v
             else:
@@ -83,7 +94,7 @@ def convert_to_camel(data: Any) -> Any:
     if isinstance(data, dict):
         converted: dict[str, Any] = {}
         for k, v in data.items():
-            if k == "headers" and isinstance(v, dict):
+            if k in {"headers", "extra_headers"} and isinstance(v, dict):
                 # Preserve header keys as-is (case and punctuation matter)
                 converted[k] = v
             else:

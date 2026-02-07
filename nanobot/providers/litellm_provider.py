@@ -26,15 +26,15 @@ class LiteLLMProvider(LLMProvider):
         api_key: str | None = None, 
         api_base: str | None = None,
         api_type: str | None = None,
-        extra_headers: dict[str, str] | None = None,
         proxy: str | None = None,
         drop_params: bool = False,
-        default_model: str = "anthropic/claude-opus-4-5"
+        extra_headers: dict[str, str] | None = None,
+        default_model: str = "anthropic/claude-opus-4-5",
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.api_type = api_type.lower() if api_type else None
-        self.extra_headers = extra_headers
+        self.extra_headers = extra_headers or {}
         self.proxy = proxy
         self.drop_params = drop_params
         
@@ -43,21 +43,29 @@ class LiteLLMProvider(LLMProvider):
             (api_key and api_key.startswith("sk-or-")) or
             (api_base and "openrouter" in api_base)
         )
+        # Detect AiHubMix by api_base
+        self.is_aihubmix = bool(api_base and "aihubmix" in api_base)
 
         # Track if using custom endpoint (vLLM, etc.)
-        # Don't treat openai/anthropic/deepseek/etc with custom api_base as vLLM
-        is_standard_provider = any(provider in default_model.lower() for provider in
-                                   ["openai", "gpt", "anthropic", "claude", "deepseek", "gemini"])
-        self.is_vllm = bool(api_base) and not self.is_openrouter and not is_standard_provider
+        # Avoid treating standard providers with custom api_base as vLLM.
+        standard_markers = [
+            "openai", "gpt", "anthropic", "claude", "deepseek", "gemini",
+            "zhipu", "glm", "zai", "dashscope", "qwen", "groq", "moonshot", "kimi",
+        ]
+        is_standard_provider = any(marker in default_model.lower() for marker in standard_markers)
+        self.is_vllm = bool(api_base) and not self.is_openrouter and not self.is_aihubmix and not is_standard_provider
         
         # Configure LiteLLM based on provider
         if api_key:
             if self.is_openrouter:
                 # OpenRouter mode - set key
                 os.environ["OPENROUTER_API_KEY"] = api_key
+            elif self.is_aihubmix:
+                # AiHubMix gateway - OpenAI-compatible
+                os.environ["OPENAI_API_KEY"] = api_key
             elif self.is_vllm:
                 # vLLM/custom endpoint - uses OpenAI-compatible API
-                os.environ["OPENAI_API_KEY"] = api_key
+                os.environ["HOSTED_VLLM_API_KEY"] = api_key
             elif "deepseek" in default_model:
                 os.environ.setdefault("DEEPSEEK_API_KEY", api_key)
             elif "anthropic" in default_model:
@@ -67,9 +75,15 @@ class LiteLLMProvider(LLMProvider):
             elif "gemini" in default_model.lower():
                 os.environ.setdefault("GEMINI_API_KEY", api_key)
             elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
+                os.environ.setdefault("ZAI_API_KEY", api_key)
                 os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
+            elif "dashscope" in default_model or "qwen" in default_model.lower():
+                os.environ.setdefault("DASHSCOPE_API_KEY", api_key)
             elif "groq" in default_model:
                 os.environ.setdefault("GROQ_API_KEY", api_key)
+            elif "moonshot" in default_model or "kimi" in default_model:
+                os.environ.setdefault("MOONSHOT_API_KEY", api_key)
+                os.environ.setdefault("MOONSHOT_API_BASE", api_base or "https://api.moonshot.cn/v1")
         
         if api_base:
             litellm.api_base = api_base
@@ -106,7 +120,6 @@ class LiteLLMProvider(LLMProvider):
             LLMResponse with content and/or tool calls.
         """
         model = model or self.default_model
-
         if self._use_responses_api():
             response = await self._chat_with_responses(
                 messages=messages,
@@ -149,27 +162,31 @@ class LiteLLMProvider(LLMProvider):
         session_state: dict[str, Any] | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        # For OpenRouter, prefix model name if not already prefixed
+        # Auto-prefix model names for known providers
+        # (keywords, target_prefix, skip_if_starts_with)
+        _prefix_rules = [
+            (("glm", "zhipu"), "zai", ("zhipu/", "zai/", "openrouter/", "hosted_vllm/")),
+            (("qwen", "dashscope"), "dashscope", ("dashscope/", "openrouter/")),
+            (("moonshot", "kimi"), "moonshot", ("moonshot/", "openrouter/")),
+            (("gemini",), "gemini", ("gemini/",)),
+        ]
+        model_lower = model.lower()
+        for keywords, prefix, skip in _prefix_rules:
+            if any(kw in model_lower for kw in keywords) and not any(model.startswith(s) for s in skip):
+                model = f"{prefix}/{model}"
+                break
+
+        # Gateway/endpoint-specific prefixes (detected by api_base/api_key, not model name)
         if self.is_openrouter and not model.startswith("openrouter/"):
             model = f"openrouter/{model}"
-
-        # For Zhipu/Z.ai, ensure prefix is present
-        # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"
-        if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
-            model.startswith("zhipu/") or
-            model.startswith("zai/") or
-            model.startswith("openrouter/")
-        ):
-            model = f"zai/{model}"
-
-        # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
-        # Convert openai/ prefix to hosted_vllm/ if user specified it
-        if self.is_vllm:
+        elif self.is_aihubmix:
+            model = f"openai/{model.split('/')[-1]}"
+        elif self.is_vllm:
             model = f"hosted_vllm/{model}"
-
-        # For Gemini, ensure gemini/ prefix if not already present
-        if "gemini" in model.lower() and not model.startswith("gemini/"):
-            model = f"gemini/{model}"
+        
+        # kimi-k2.5 only supports temperature=1.0
+        if "kimi-k2.5" in model.lower():
+            temperature = 1.0
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -182,7 +199,6 @@ class LiteLLMProvider(LLMProvider):
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
             kwargs["api_base"] = self.api_base
-
         if tools:
             kwargs["tools"] = tools
         if self.extra_headers:

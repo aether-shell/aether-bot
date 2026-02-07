@@ -208,6 +208,52 @@ class FeishuChannel(BaseChannel):
         
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+
+    # Regex to match markdown tables (header + separator + data rows)
+    _TABLE_RE = re.compile(
+        r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
+        re.MULTILINE,
+    )
+
+    @staticmethod
+    def _parse_md_table(table_text: str) -> dict | None:
+        """Parse a markdown table into a Feishu table element."""
+        lines = [line.strip() for line in table_text.strip().split("\n") if line.strip()]
+        if len(lines) < 3:
+            return None
+        split = lambda line: [cell.strip() for cell in line.strip("|").split("|")]
+        headers = split(lines[0])
+        rows = [split(line) for line in lines[2:]]
+        columns = [
+            {"tag": "column", "name": f"c{i}", "display_name": header, "width": "auto"}
+            for i, header in enumerate(headers)
+        ]
+        return {
+            "tag": "table",
+            "page_size": len(rows) + 1,
+            "columns": columns,
+            "rows": [
+                {f"c{i}": row[i] if i < len(row) else "" for i in range(len(headers))}
+                for row in rows
+            ],
+        }
+
+    def _build_card_elements(self, content: str) -> list[dict]:
+        """Split content into markdown + table elements for Feishu card."""
+        elements: list[dict] = []
+        last_end = 0
+        for match in self._TABLE_RE.finditer(content):
+            before = content[last_end:match.start()].strip()
+            if before:
+                elements.append({"tag": "markdown", "content": before})
+            elements.append(
+                self._parse_md_table(match.group(1)) or {"tag": "markdown", "content": match.group(1)}
+            )
+            last_end = match.end()
+        remaining = content[last_end:].strip()
+        if remaining:
+            elements.append({"tag": "markdown", "content": remaining})
+        return elements or [{"tag": "markdown", "content": content}]
     
     @staticmethod
     def _has_markdown(text: str) -> bool:
@@ -250,6 +296,7 @@ class FeishuChannel(BaseChannel):
 
     async def _send_markdown_card(self, to: str, markdown: str, receive_id_type: str) -> bool:
         """Send Markdown as interactive card."""
+        elements = self._build_card_elements(markdown)
         card = {
             "config": {"wide_screen_mode": True},
             "elements": [
@@ -259,7 +306,9 @@ class FeishuChannel(BaseChannel):
                 }
             ],
         }
-        content = json.dumps(card)
+        if elements:
+            card["elements"] = elements
+        content = json.dumps(card, ensure_ascii=False)
 
         try:
             request = CreateMessageRequest.builder() \

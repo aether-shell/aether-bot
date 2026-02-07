@@ -99,6 +99,7 @@ class AgentLoop:
         stream_min_chars: int = 120,
         stream_min_interval_s: float = 0.5,
         context_config: "ContextConfig | None" = None,
+        restrict_to_workspace: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, ContextConfig
         from nanobot.cron.service import CronService
@@ -114,6 +115,7 @@ class AgentLoop:
         self.stream_min_chars = stream_min_chars
         self.stream_min_interval_s = stream_min_interval_s
         self.context_config = context_config or ContextConfig()
+        self.restrict_to_workspace = restrict_to_workspace
         
         self.context = ContextBuilder(workspace)
         self.context_manager = ContextManager(
@@ -131,6 +133,7 @@ class AgentLoop:
             model=self.model,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
+            restrict_to_workspace=self.restrict_to_workspace,
         )
         
         self._running = False
@@ -138,17 +141,18 @@ class AgentLoop:
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        # File tools
-        self.tools.register(ReadFileTool())
-        self.tools.register(WriteFileTool())
-        self.tools.register(EditFileTool())
-        self.tools.register(ListDirTool())
+        # File tools (restrict to workspace if configured)
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
+        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
         
         # Shell tool
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.exec_config.restrict_to_workspace,
+            restrict_to_workspace=self.restrict_to_workspace,
         ))
         
         # Web tools
@@ -240,8 +244,8 @@ class AgentLoop:
                 content="✅ 已开启新会话（历史已保留）。你好！我能帮你做什么？"
             )
         
-        logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
-
+        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
+        logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         trace_id = None
         if isinstance(msg.metadata, dict):
             trace_id = msg.metadata.get("trace_id")
@@ -344,9 +348,9 @@ class AgentLoop:
                     if response.response_id:
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     t_tool = time.monotonic()
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -367,6 +371,10 @@ class AgentLoop:
         if last_response is not None:
             self.context_manager.update_after_response(session, last_response)
 
+        # Log response preview
+        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+        
         # Save to session
         t_save = time.monotonic()
         session.add_message("user", msg.content)
@@ -552,8 +560,8 @@ class AgentLoop:
                     if response.response_id:
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
