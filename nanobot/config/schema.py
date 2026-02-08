@@ -99,6 +99,7 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None
     api_type: str | None = None  # e.g. "openai-responses" for /v1/responses
+    session_mode: str | None = None  # "native", "stateless", or "auto" (default). Controls previous_response_id usage.
     headers: dict[str, str] | None = None  # Extra headers for provider requests
     proxy: str | None = None  # Optional proxy URL, e.g. "http://127.0.0.1:7897"
     drop_params: bool = False  # Drop optional params for strict gateways
@@ -232,6 +233,16 @@ class Config(BaseSettings):
         """Check if optional params should be dropped for the active provider."""
         provider = self.get_provider(model)
         return bool(provider.drop_params) if provider else False
+
+    def get_session_mode(self, model: str | None = None) -> str | None:
+        """Get session mode for the active provider: 'native', 'stateless', or None (auto)."""
+        provider = self.get_provider(model)
+        if not provider or not provider.session_mode:
+            return None
+        mode = provider.session_mode.lower().strip()
+        if mode in ("native", "stateless", "auto"):
+            return mode if mode != "auto" else None
+        return None
     
     class Config:
         env_prefix = "NANOBOT_"

@@ -241,7 +241,8 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="✅ 已开启新会话（历史已保留）。你好！我能帮你做什么？"
+                content="✅ 已开启新会话（历史已保留）。你好！我能帮你做什么？",
+                metadata=dict(msg.metadata) if msg.metadata else None,
             )
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
@@ -337,7 +338,7 @@ class AgentLoop:
                 # First call succeeded — feed it into the normal loop
                 last_response = first_response
                 if first_response.has_tool_calls:
-                    if first_response.response_id:
+                    if first_response.response_id and first_response.response_id.startswith("resp_"):
                         session_state = {"previous_response_id": first_response.response_id}
                     messages = []
                     for tool_call in first_response.tool_calls:
@@ -401,7 +402,7 @@ class AgentLoop:
                 tool_time = 0.0
                 if native_mode:
                     messages = []
-                    if response.response_id:
+                    if response.response_id and response.response_id.startswith("resp_"):
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
@@ -613,7 +614,7 @@ class AgentLoop:
                 
                 if native_mode:
                     messages = []
-                    if response.response_id:
+                    if response.response_id and response.response_id.startswith("resp_"):
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)

@@ -26,14 +26,15 @@ class LiteLLMProvider(LLMProvider):
     """
     
     def __init__(
-        self, 
-        api_key: str | None = None, 
+        self,
+        api_key: str | None = None,
         api_base: str | None = None,
         api_type: str | None = None,
         proxy: str | None = None,
         drop_params: bool = False,
         extra_headers: dict[str, str] | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
+        session_mode: str | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
@@ -41,6 +42,10 @@ class LiteLLMProvider(LLMProvider):
         self.extra_headers = extra_headers or {}
         self.proxy = proxy
         self.drop_params = drop_params
+        # Session mode: "native", "stateless", or None (auto-detect)
+        self.session_mode = session_mode.lower().strip() if session_mode else None
+        # Runtime flag: set to True when API rejects previous_response_id
+        self._native_session_disabled = False
         
         # Detect OpenRouter by api_key prefix or explicit api_base
         self.is_openrouter = (
@@ -126,6 +131,11 @@ class LiteLLMProvider(LLMProvider):
         """
         model = model or self.default_model
         if self._use_responses_api():
+            # If native session is disabled (runtime or config), strip previous_response_id
+            if self._native_session_disabled or self.session_mode == "stateless":
+                if session_state:
+                    session_state = {k: v for k, v in session_state.items() if k != "previous_response_id"}
+
             response = await self._chat_with_responses(
                 messages=messages,
                 tools=tools,
@@ -135,16 +145,37 @@ class LiteLLMProvider(LLMProvider):
                 session_state=session_state,
                 on_delta=on_delta,
             )
-            if response.finish_reason == "error" and self._should_fallback_from_responses(response.content):
-                return await self._chat_with_completions(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    session_state=session_state,
-                    on_delta=on_delta,
-                )
+            if response.finish_reason == "error":
+                # Check if API explicitly rejects previous_response_id
+                if self._should_disable_native_session(response.content):
+                    logger.warning(
+                        "API does not support previous_response_id, "
+                        "disabling native session permanently for this provider"
+                    )
+                    self._native_session_disabled = True
+                    # Retry without previous_response_id
+                    clean_state = None
+                    if session_state:
+                        clean_state = {k: v for k, v in session_state.items() if k != "previous_response_id"}
+                    return await self._chat_with_responses(
+                        messages=messages,
+                        tools=tools,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        session_state=clean_state,
+                        on_delta=on_delta,
+                    )
+                if self._should_fallback_from_responses(response.content):
+                    return await self._chat_with_completions(
+                        messages=messages,
+                        tools=tools,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        session_state=session_state,
+                        on_delta=on_delta,
+                    )
             return response
 
         return await self._chat_with_completions(
@@ -237,6 +268,18 @@ class LiteLLMProvider(LLMProvider):
         if "http 404" in text or "http 405" in text:
             return True
         if "not found" in text or "no route" in text:
+            return True
+        # 5xx gateway errors
+        if "http 502" in text or "http 503" in text or "bad gateway" in text:
+            return True
+        if "error code: 502" in text:
+            return True
+        return False
+
+    def _should_disable_native_session(self, content: str | None) -> bool:
+        """Check if the error indicates previous_response_id is not supported."""
+        text = (content or "").lower()
+        if "unsupported parameter" in text and "previous_response_id" in text:
             return True
         return False
 
@@ -377,11 +420,17 @@ class LiteLLMProvider(LLMProvider):
                                 raw = await response.aread()
                                 raw_text = raw.decode("utf-8", "ignore")
                                 if response.status_code < 500:
+                                    # Filter HTML from error messages
+                                    error_text = raw_text
+                                    if "<html" in error_text.lower() or len(error_text) > 500:
+                                        error_text = error_text[:200]
                                     return LLMResponse(
-                                        content=f"Error calling LLM: HTTP {response.status_code} {raw_text}",
+                                        content=f"Error calling LLM: HTTP {response.status_code} {error_text}",
                                         finish_reason="error",
                                     )
-                                last_error = f"HTTP {response.status_code} {raw_text[:200]}"
+                                # For 5xx: don't include raw HTML in error
+                                short_error = raw_text[:200] if "<html" not in raw_text.lower() else ""
+                                last_error = f"HTTP {response.status_code} {short_error}".strip()
                                 is_retryable = True
                         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
                             last_error = str(e)
@@ -401,11 +450,15 @@ class LiteLLMProvider(LLMProvider):
                                 return parsed
                             raw = response.text
                             if response.status_code < 500:
+                                error_text = raw
+                                if "<html" in error_text.lower() or len(error_text) > 500:
+                                    error_text = error_text[:200]
                                 return LLMResponse(
-                                    content=f"Error calling LLM: HTTP {response.status_code} {raw}",
+                                    content=f"Error calling LLM: HTTP {response.status_code} {error_text}",
                                     finish_reason="error",
                                 )
-                            last_error = f"HTTP {response.status_code} {raw[:200]}"
+                            short_error = raw[:200] if "<html" not in raw.lower() else ""
+                            last_error = f"HTTP {response.status_code} {short_error}".strip()
                             is_retryable = True
                         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
                             last_error = str(e)
@@ -634,6 +687,10 @@ class LiteLLMProvider(LLMProvider):
             model = response.get("model") or model
             conversation = response.get("conversation") or {}
             conversation_id = response.get("conversation_id") or conversation.get("id")
+
+        # chat/completions returns chatcmpl-* IDs, not valid for Responses API sessions
+        if response_id and not response_id.startswith("resp_"):
+            response_id = None
 
         return LLMResponse(
             content=message.content,
@@ -958,4 +1015,12 @@ class LiteLLMProvider(LLMProvider):
 
     def supports_native_session(self) -> bool:
         """Return True when using Responses API with previous_response_id support."""
-        return self._use_responses_api()
+        if not self._use_responses_api():
+            return False
+        # Config explicitly says stateless
+        if self.session_mode == "stateless":
+            return False
+        # Runtime detection: API rejected previous_response_id
+        if self._native_session_disabled:
+            return False
+        return True

@@ -160,6 +160,7 @@ def _make_provider(config):
     api_headers = config.get_api_headers(model)
     api_proxy = config.get_api_proxy(model)
     drop_params = config.get_drop_params(model)
+    session_mode = config.get_session_mode(model)
     provider_cfg = config.get_provider(model)
     is_vllm = provider_cfg is config.providers.vllm and bool(provider_cfg.api_base)
 
@@ -176,6 +177,7 @@ def _make_provider(config):
         proxy=api_proxy,
         drop_params=drop_params,
         default_model=model,
+        session_mode=session_mode,
     )
 
 

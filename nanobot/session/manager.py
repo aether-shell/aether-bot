@@ -82,11 +82,11 @@ class SessionManager:
             if isinstance(data, dict):
                 old = dict(self._active_sessions)
                 self._active_sessions = {str(k): str(v) for k, v in data.items()}
-                # Log changes for debugging session switch issues
+                # Only log actual runtime changes (skip initial load from None)
                 for k in set(list(old.keys()) + list(self._active_sessions.keys())):
                     ov = old.get(k)
                     nv = self._active_sessions.get(k)
-                    if ov != nv:
+                    if ov != nv and ov is not None:
                         logger.debug(f"active_index changed: {k}: {ov} -> {nv}")
         except Exception as e:
             logger.warning(f"Failed to load session index: {e}")

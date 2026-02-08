@@ -215,7 +215,17 @@ class ContextManager:
             return
 
         llm_meta = session.metadata.setdefault("llm_session", {})
-        if response.response_id:
+
+        # On LLM error, clear native session state to prevent stale ID usage
+        if response.finish_reason == "error":
+            if llm_meta.get("previous_response_id"):
+                logger.warning("LLM error detected, clearing native session state")
+                llm_meta["previous_response_id"] = None
+                llm_meta["pending_reset"] = True
+            return
+
+        # Only store valid Responses API IDs (resp_* prefix)
+        if response.response_id and response.response_id.startswith("resp_"):
             llm_meta["previous_response_id"] = response.response_id
         if response.conversation_id:
             llm_meta["conversation_id"] = response.conversation_id
