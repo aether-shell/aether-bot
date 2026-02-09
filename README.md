@@ -92,7 +92,7 @@ pip install nanobot-ai
 ## 🚀 Quick Start
 
 > [!TIP]
-> Set your API key in `~/.nanobot/config.json`.
+> Set your API key in `~/.aether-shell/config.json`.
 > Get API keys: [OpenRouter](https://openrouter.ai/keys) (Global) · [DashScope](https://dashscope.console.aliyun.com) (Qwen) · [Brave Search](https://brave.com/search/api/) (optional, for web search)
 
 **1. Initialize**
@@ -101,7 +101,7 @@ pip install nanobot-ai
 nanobot onboard
 ```
 
-**2. Configure** (`~/.nanobot/config.json`)
+**2. Configure** (`~/.aether-shell/config.json`)
 
 For OpenRouter - recommended for global users:
 ```json
@@ -137,7 +137,7 @@ Run nanobot with your own local models using vLLM or any OpenAI-compatible serve
 vllm serve meta-llama/Llama-3.1-8B-Instruct --port 8000
 ```
 
-**2. Configure** (`~/.nanobot/config.json`)
+**2. Configure** (`~/.aether-shell/config.json`)
 
 ```json
 {
@@ -339,7 +339,7 @@ nanobot gateway
 
 ## ⚙️ Configuration
 
-Config file: `~/.nanobot/config.json`
+Config file: `~/.aether-shell/config.json`
 
 ### Providers
 
@@ -448,7 +448,7 @@ nanobot cron remove <job_id>
 ## 🐳 Docker
 
 > [!TIP]
-> The `-v ~/.nanobot:/root/.nanobot` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
+> The `-v ~/.aether-shell:/root/.aether-shell` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
 
 Build and run aether-shell in a container:
 
@@ -457,17 +457,17 @@ Build and run aether-shell in a container:
 docker build -t aether-shell .
 
 # Initialize config (first time only)
-docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell onboard
+docker run -v ~/.aether-shell:/root/.aether-shell --rm aether-shell onboard
 
 # Edit config on host to add API keys
-vim ~/.nanobot/config.json
+vim ~/.aether-shell/config.json
 
 # Run gateway (connects to Telegram/WhatsApp)
-docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 aether-shell gateway
+docker run -v ~/.aether-shell:/root/.aether-shell -p 18790:18790 aether-shell gateway
 
 # Or run a single command
-docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell agent -m "Hello!"
-docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell status
+docker run -v ~/.aether-shell:/root/.aether-shell --rm aether-shell agent -m "Hello!"
+docker run -v ~/.aether-shell:/root/.aether-shell --rm aether-shell status
 ```
 
 ## 📁 Project Structure

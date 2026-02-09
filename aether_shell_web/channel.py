@@ -20,8 +20,8 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 
-from nanobot_web.auth import AuthManager
-from nanobot_web.rate_limit import RateLimiter
+from aether_shell_web.auth import AuthManager
+from aether_shell_web.rate_limit import RateLimiter
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -53,13 +53,20 @@ class HTTPChannel(BaseChannel):
         self._event_buffer: dict[str, deque] = {}
         self._event_buffer_size = 2000
         # Persistent sessions directory
-        self._sessions_dir = pathlib.Path.home() / ".nanobot" / "sessions"
+        self._sessions_dir = pathlib.Path.home() / ".aether-shell" / "sessions"
         # Message deduplication: message_id -> None (LRU, max 1000)
         self._processed_messages: OrderedDict[str, None] = OrderedDict()
         # Media registry: file_id -> local path
         self._media_registry: dict[str, str] = {}
         # Upload directory
-        self._upload_dir = pathlib.Path.home() / ".nanobot" / "web_uploads"
+        self._upload_dir = pathlib.Path.home() / ".aether-shell" / "web_uploads"
+        # Branding config + assets (outside repo)
+        self._brand_path = pathlib.Path(
+            getattr(config, "brand_path", str(pathlib.Path.home() / ".aether-shell" / "brand.json"))
+        ).expanduser()
+        self._brand_assets_dir = pathlib.Path(
+            getattr(config, "brand_assets_dir", str(pathlib.Path.home() / ".aether-shell" / "brand-assets"))
+        ).expanduser()
         # Subscribe to outbound messages
         self.bus.subscribe_outbound("web", self.send)
 
@@ -82,7 +89,9 @@ class HTTPChannel(BaseChannel):
         self._app.router.add_get("/css/{filename}", self._handle_static_asset)
         self._app.router.add_get("/js/{filename}", self._handle_static_asset)
         self._app.router.add_get("/icons/{filename}", self._handle_static_asset)
-        self._app.router.add_get("/manifest.json", self._handle_static_file)
+        self._app.router.add_get("/manifest.json", self._handle_manifest)
+        self._app.router.add_get("/brand.json", self._handle_brand)
+        self._app.router.add_get("/brand-assets/{path:.*}", self._handle_brand_asset)
         self._app.router.add_get("/sw.js", self._handle_static_file)
 
         self._runner = web.AppRunner(self._app)
@@ -397,7 +406,7 @@ class HTTPChannel(BaseChannel):
     # ---- Sessions (disk-based) ----
 
     def _scan_sessions_for_chat(self, chat_id: str) -> list[dict]:
-        """Scan ~/.nanobot/sessions/ for JSONL files belonging to this chat_id."""
+        """Scan ~/.aether-shell/sessions/ for JSONL files belonging to this chat_id."""
         if not self._sessions_dir.exists():
             return []
 
@@ -657,7 +666,7 @@ class HTTPChannel(BaseChannel):
             logger.warning(f"Failed to mark pending_reset: {e}")
 
     def _update_active_index(self, base_key: str, active_key: str) -> None:
-        """Update ~/.nanobot/sessions/active.json."""
+        """Update ~/.aether-shell/sessions/active.json."""
         active_path = self._sessions_dir / "active.json"
         data = {}
         if active_path.exists():
@@ -706,6 +715,86 @@ class HTTPChannel(BaseChannel):
         if not filepath.exists() or not filepath.is_file():
             return web.Response(status=404, text="Not found")
         resp = web.FileResponse(filepath)
+        self._no_cache_headers(resp)
+        return resp
+
+    def _load_json_file(self, filepath: pathlib.Path) -> dict:
+        if not filepath.exists():
+            return {}
+        try:
+            return json.loads(filepath.read_text("utf-8"))
+        except Exception:
+            logger.warning(f"Failed to read {filepath}")
+            return {}
+
+    def _load_static_json(self, filename: str) -> dict:
+        return self._load_json_file(STATIC_DIR / filename)
+
+    def _load_brand_json(self) -> dict:
+        brand = self._load_json_file(self._brand_path)
+        if brand:
+            return brand
+        # Optional fallback for development (if a static brand.json exists)
+        return self._load_static_json("brand.json")
+
+    def _build_manifest(self) -> dict:
+        manifest = self._load_static_json("manifest.json")
+        if not isinstance(manifest, dict):
+            manifest = {}
+        brand = self._load_brand_json()
+        if not isinstance(brand, dict):
+            brand = {}
+
+        product_name = brand.get("productName")
+        if product_name:
+            manifest["name"] = product_name
+            manifest["short_name"] = brand.get("shortName") or product_name
+
+        tagline = brand.get("tagline")
+        if tagline:
+            manifest["description"] = tagline
+
+        theme_color = brand.get("themeColor")
+        if theme_color:
+            manifest["theme_color"] = theme_color
+
+        background_color = brand.get("backgroundColor")
+        if background_color:
+            manifest["background_color"] = background_color
+
+        manifest_icons = brand.get("manifestIcons")
+        if isinstance(manifest_icons, list):
+            manifest["icons"] = manifest_icons
+
+        brand_manifest = brand.get("manifest")
+        if isinstance(brand_manifest, dict):
+            manifest.update(brand_manifest)
+
+        return manifest
+
+    async def _handle_manifest(self, request: web.Request) -> web.Response:
+        manifest = self._build_manifest()
+        resp = web.json_response(manifest)
+        self._no_cache_headers(resp)
+        return resp
+
+    async def _handle_brand(self, request: web.Request) -> web.Response:
+        brand = self._load_brand_json()
+        resp = web.json_response(brand)
+        self._no_cache_headers(resp)
+        return resp
+
+    async def _handle_brand_asset(self, request: web.Request) -> web.Response:
+        rel_path = request.match_info.get("path", "")
+        if not rel_path:
+            return web.Response(status=404, text="Not found")
+        base = self._brand_assets_dir.resolve()
+        candidate = (base / rel_path).resolve()
+        if base not in candidate.parents and candidate != base:
+            return web.Response(status=403, text="Forbidden")
+        if not candidate.exists() or not candidate.is_file():
+            return web.Response(status=404, text="Not found")
+        resp = web.FileResponse(candidate)
         self._no_cache_headers(resp)
         return resp
 

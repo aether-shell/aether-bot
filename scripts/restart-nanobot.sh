@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODE="${NANOBOT_MODE:-local}"
-DATA_DIR="${NANOBOT_DATA_DIR:-$HOME/.nanobot}"
+DATA_DIR="${NANOBOT_DATA_DIR:-$HOME/.aether-shell}"
 LOG_DIR="${NANOBOT_LOG_DIR:-$DATA_DIR/logs}"
 RUN_DIR="${NANOBOT_RUN_DIR:-$DATA_DIR/run}"
 LOG_FILE="${NANOBOT_LOG_FILE:-$LOG_DIR/gateway.log}"
@@ -14,7 +14,7 @@ if [[ "$MODE" == "docker" ]]; then
   PORT="${NANOBOT_PORT:-18790}"
 
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" -v "$DATA_DIR":/root/.nanobot -p "${PORT}:${PORT}" "$IMAGE" gateway
+  docker run -d --name "$CONTAINER" -v "$DATA_DIR":/root/.aether-shell -p "${PORT}:${PORT}" "$IMAGE" gateway
   echo "nanobot gateway (docker) started: $CONTAINER"
   exit 0
 fi

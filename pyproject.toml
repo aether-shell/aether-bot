@@ -49,7 +49,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot", "nanobot_web"]
+packages = ["nanobot", "aether_shell_web"]
 
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"
@@ -60,14 +60,14 @@ include = [
     "nanobot/**/*.py",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
-    "nanobot_web/**/*.py",
-    "nanobot_web/static/**",
+    "aether_shell_web/**/*.py",
+    "aether_shell_web/static/**",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "nanobot/",
-    "nanobot_web/",
+    "aether_shell_web/",
     "bridge/",
     "README.md",
     "LICENSE",

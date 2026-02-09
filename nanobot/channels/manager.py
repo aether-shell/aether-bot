@@ -90,7 +90,7 @@ class ChannelManager:
         # Web/PWA channel
         if self.config.channels.web.enabled:
             try:
-                from nanobot_web.channel import HTTPChannel
+                from aether_shell_web.channel import HTTPChannel
                 self.channels["web"] = HTTPChannel(
                     self.config.channels.web, self.bus
                 )
