@@ -1,6 +1,7 @@
 """Async message queue for decoupled channel-agent communication."""
 
 import asyncio
+import time
 from typing import Callable, Awaitable
 
 from loguru import logger
@@ -32,6 +33,9 @@ class MessageBus:
     
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
+        if not msg.metadata:
+            msg.metadata = {}
+        msg.metadata.setdefault("_enqueued_at", time.monotonic())
         await self.outbound.put(msg)
     
     async def consume_outbound(self) -> OutboundMessage:

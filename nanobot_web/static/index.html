@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#f59e0b">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Nanobot">
+    <title>Nanobot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spline+Sans:wght@300;400;500;600;700&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap">
+    <link rel="stylesheet" href="/css/style.css?v=20260208a">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+</head>
+<body>
+    <!-- Login View -->
+    <div id="login-view" class="view login-view">
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="login-icon" aria-hidden="true">
+                    <span class="material-symbols-outlined">pets</span>
+                </div>
+                <div>
+                    <h1>Nanobot</h1>
+                    <p>Invite-only AI companion</p>
+                </div>
+            </div>
+            <p class="login-subtitle">Enter invite code to start chatting</p>
+            <form id="login-form">
+                <label class="sr-only" for="invite-code">Invite code</label>
+                <input type="password" id="invite-code" placeholder="Invite code" autocomplete="off" required>
+                <button type="submit" id="login-btn">
+                    <span class="material-symbols-outlined" aria-hidden="true">login</span>
+                    Login
+                </button>
+            </form>
+            <p id="login-error" class="error-text" aria-live="polite"></p>
+        </div>
+    </div>
+
+    <!-- Chat View -->
+    <div id="chat-view" class="view chat-view hidden">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-head">
+                <div class="sidebar-profile">
+                    <div class="sidebar-avatar" aria-hidden="true"></div>
+                    <div>
+                        <h2>Nanobot</h2>
+                        <span class="status-pill">
+                            <span class="status-dot" aria-hidden="true"></span>
+                            Online
+                        </span>
+                    </div>
+                </div>
+                <button id="sidebar-close" class="icon-btn icon-btn-ghost" aria-label="Close">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <p class="sidebar-title">Recent Chats</p>
+            <ul id="session-list" class="session-list"></ul>
+            <button id="logout-btn" class="sidebar-logout">
+                <span class="material-symbols-outlined" aria-hidden="true">logout</span>
+                Logout
+            </button>
+        </aside>
+        <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+        <!-- Main Content Area -->
+        <main class="chat-main">
+            <div class="chat-shell">
+                <header class="chat-header">
+                    <div class="header-row">
+                        <button id="sidebar-toggle" class="icon-btn icon-btn-ghost" aria-label="Menu">
+                            <span class="material-symbols-outlined">menu</span>
+                        </button>
+                        <div class="chat-title-wrap">
+                            <h2 id="chat-title">Nanobot</h2>
+                            <span class="chat-status">
+                                <span class="status-dot" aria-hidden="true"></span>
+                                Online
+                            </span>
+                        </div>
+                        <button id="new-chat-btn" class="cat-ear-btn" aria-label="New chat">
+                            <span class="material-symbols-outlined" aria-hidden="true">add</span>
+                            <span>New Chat</span>
+                        </button>
+                    </div>
+                    <div id="context-bar" class="context-bar hidden"></div>
+                </header>
+
+                <main id="messages" class="messages"></main>
+
+                <div class="input-container">
+                    <div id="attachment-preview" class="attachment-preview hidden"></div>
+                    <form id="message-form">
+                        <button type="button" id="attach-btn" class="icon-btn icon-btn-soft attach-btn" aria-label="Attach file">
+                            <span class="material-symbols-outlined">add_circle</span>
+                        </button>
+                        <input type="file" id="file-input" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.zip" hidden>
+                        <textarea id="message-input" placeholder="Type a message..." rows="1" autocomplete="off"></textarea>
+                        <button type="submit" id="send-btn" aria-label="Send">
+                            <span class="material-symbols-outlined">send</span>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </main>
+
+        <!-- Lightbox -->
+        <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+            <button id="lightbox-close" class="lightbox-close" aria-label="Close">
+                <span class="material-symbols-outlined">close</span>
+            </button>
+            <img id="lightbox-img" src="" alt="Preview">
+        </div>
+    </div>
+
+    <script src="/js/app.js?v=20260208a"></script>
+</body>
+</html>

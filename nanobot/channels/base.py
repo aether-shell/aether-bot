@@ -2,6 +2,10 @@
 
 from abc import ABC, abstractmethod
 from typing import Any
+import time
+import uuid
+
+from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -102,15 +106,24 @@ class BaseChannel(ABC):
             metadata: Optional channel-specific metadata.
         """
         if not self.is_allowed(sender_id):
+            logger.warning(
+                f"Access denied for sender {sender_id} on channel {self.name}. "
+                f"Add them to allowFrom list in config to grant access."
+            )
             return
         
+        meta = dict(metadata or {})
+        if "trace_id" not in meta:
+            meta["trace_id"] = f"{self.name}-{uuid.uuid4().hex[:8]}"
+        meta.setdefault("_received_at", time.monotonic())
+
         msg = InboundMessage(
             channel=self.name,
             sender_id=str(sender_id),
             chat_id=str(chat_id),
             content=content,
             media=media or [],
-            metadata=metadata or {}
+            metadata=meta
         )
         
         await self.bus.publish_inbound(msg)

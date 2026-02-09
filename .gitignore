@@ -13,3 +13,11 @@ docs/
 *.pyz
 *.pywz
 *.pyzz
+.venv/
+__pycache__/
+poetry.lock
+.pytest_cache/
+.DS_Store
+**/.DS_Store
+monitor_llm.log
+tests/

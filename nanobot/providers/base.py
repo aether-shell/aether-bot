@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -20,6 +20,9 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
+    response_id: str | None = None
+    conversation_id: str | None = None
+    model: str | None = None
     
     @property
     def has_tool_calls(self) -> bool:
@@ -47,6 +50,8 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        session_state: dict[str, Any] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -57,11 +62,17 @@ class LLMProvider(ABC):
             model: Model identifier (provider-specific).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            session_state: Optional provider-specific session state.
+            on_delta: Optional async callback for streaming text deltas.
         
         Returns:
             LLMResponse with content and/or tool calls.
         """
         pass
+
+    def supports_native_session(self) -> bool:
+        """Return True if the provider supports native server-side sessions."""
+        return False
     
     @abstractmethod
     def get_default_model(self) -> str:
