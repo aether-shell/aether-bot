@@ -11,8 +11,8 @@ def ensure_dir(path: Path) -> Path:
 
 
 def get_data_path() -> Path:
-    """Get the nanobot data directory (~/.nanobot)."""
-    return ensure_dir(Path.home() / ".nanobot")
+    """Get the nanobot data directory (~/.aether-shell)."""
+    return ensure_dir(Path.home() / ".aether-shell")
 
 
 def get_workspace_path(workspace: str | None = None) -> Path:
@@ -20,7 +20,7 @@ def get_workspace_path(workspace: str | None = None) -> Path:
     Get the workspace path.
     
     Args:
-        workspace: Optional workspace path. Defaults to ~/.nanobot/workspace.
+        workspace: Optional workspace path. Defaults to ~/.aether-shell/workspace.
     
     Returns:
         Expanded and ensured workspace path.
@@ -28,7 +28,7 @@ def get_workspace_path(workspace: str | None = None) -> Path:
     if workspace:
         path = Path(workspace).expanduser()
     else:
-        path = Path.home() / ".nanobot" / "workspace"
+        path = Path.home() / ".aether-shell" / "workspace"
     return ensure_dir(path)
 
 

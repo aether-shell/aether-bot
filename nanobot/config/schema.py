@@ -78,7 +78,7 @@ class ContextConfig(BaseModel):
 
 class AgentDefaults(BaseModel):
     """Default agent configuration."""
-    workspace: str = "~/.nanobot/workspace"
+    workspace: str = "~/.aether-shell/workspace"
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
     temperature: float = 0.7
