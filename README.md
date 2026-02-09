@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="nanobot_logo.png" alt="nanobot" width="500">
-  <h1>nanobot: Ultra-Lightweight Personal AI Assistant</h1>
+  <img src="nanobot_logo.png" alt="aether-shell" width="500">
+  <h1>aether-shell: Ultra-Lightweight Personal AI Assistant</h1>
   <p>
     <a href="https://pypi.org/project/nanobot-ai/"><img src="https://img.shields.io/pypi/v/nanobot-ai" alt="PyPI"></a>
     <a href="https://pepy.tech/project/nanobot-ai"><img src="https://static.pepy.tech/badge/nanobot-ai" alt="Downloads"></a>
@@ -12,7 +12,7 @@
   </p>
 </div>
 
-🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [Clawdbot](https://github.com/openclaw/openclaw) 
+🐈 **aether-shell** is an **ultra-lightweight** personal AI assistant inspired by [Clawdbot](https://github.com/openclaw/openclaw) 
 
 ⚡️ Delivers core agent functionality in just **~4,000** lines of code — **99% smaller** than Clawdbot's 430k+ lines.
 
@@ -21,14 +21,14 @@
 ## 📢 News
 
 - **2026-02-08** 🔧 Refactored Providers—adding a new LLM provider now takes just 2 simple steps! Check [here](#providers).
-- **2026-02-07** 🚀 Released v0.1.3.post5 with Qwen support & several key improvements! Check [here](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post5) for details.
+- **2026-02-07** 🚀 Released v0.1.3.post5 with Qwen support & several key improvements! Check upstream release notes [here](https://github.com/LeLe1110/aether-shell/releases/tag/v0.1.3.post5).
 - **2026-02-06** ✨ Added Moonshot/Kimi provider, Discord integration, and enhanced security hardening!
 - **2026-02-05** ✨ Added Feishu channel, DeepSeek provider, and enhanced scheduled tasks support!
-- **2026-02-04** 🚀 Released v0.1.3.post4 with multi-provider & Docker support! Check [here](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post4) for details.
+- **2026-02-04** 🚀 Released v0.1.3.post4 with multi-provider & Docker support! Check upstream release notes [here](https://github.com/LeLe1110/aether-shell/releases/tag/v0.1.3.post4).
 - **2026-02-03** ⚡ Integrated vLLM for local LLM support and improved natural language task scheduling!
-- **2026-02-02** 🎉 nanobot officially launched! Welcome to try 🐈 nanobot!
+- **2026-02-02** 🎉 nanobot officially launched upstream! Welcome to try 🐈 nanobot!
 
-## Key Features of nanobot:
+## Key Features of aether-shell:
 
 🪶 **Ultra-Lightweight**: Just ~4,000 lines of core agent code — 99% smaller than Clawdbot.
 
@@ -72,8 +72,8 @@
 **Install from source** (latest features, recommended for development)
 
 ```bash
-git clone https://github.com/HKUDS/nanobot.git
-cd nanobot
+git clone https://github.com/LeLe1110/aether-shell.git
+cd aether-shell
 pip install -e .
 ```
 
@@ -450,24 +450,24 @@ nanobot cron remove <job_id>
 > [!TIP]
 > The `-v ~/.nanobot:/root/.nanobot` flag mounts your local config directory into the container, so your config and workspace persist across container restarts.
 
-Build and run nanobot in a container:
+Build and run aether-shell in a container:
 
 ```bash
 # Build the image
-docker build -t nanobot .
+docker build -t aether-shell .
 
 # Initialize config (first time only)
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot onboard
+docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell onboard
 
 # Edit config on host to add API keys
 vim ~/.nanobot/config.json
 
 # Run gateway (connects to Telegram/WhatsApp)
-docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot gateway
+docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 aether-shell gateway
 
 # Or run a single command
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot agent -m "Hello!"
-docker run -v ~/.nanobot:/root/.nanobot --rm nanobot status
+docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell agent -m "Hello!"
+docker run -v ~/.nanobot:/root/.nanobot --rm aether-shell status
 ```
 
 ## 📁 Project Structure
@@ -496,7 +496,7 @@ nanobot/
 
 PRs welcome! The codebase is intentionally small and readable. 🤗
 
-**Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
+**Roadmap** — Pick an item and open a PR!
 
 - [x] **Voice Transcription** — Support for Groq Whisper (Issue #13)
 - [ ] **Multi-modal** — See and hear (images, voice, video)
@@ -507,26 +507,26 @@ PRs welcome! The codebase is intentionally small and readable. 🤗
 
 ### Contributors
 
-<a href="https://github.com/HKUDS/nanobot/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=HKUDS/nanobot&max=100&columns=12" />
+<a href="https://github.com/LeLe1110/aether-shell/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=LeLe1110/aether-shell&max=100&columns=12" />
 </a>
 
 
 ## ⭐ Star History
 
 <div align="center">
-  <a href="https://star-history.com/#HKUDS/nanobot&Date">
+  <a href="https://star-history.com/#LeLe1110/aether-shell&Date">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=HKUDS/nanobot&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=HKUDS/nanobot&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=HKUDS/nanobot&type=Date" style="border-radius: 15px; box-shadow: 0 0 30px rgba(0, 217, 255, 0.3);" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LeLe1110/aether-shell&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LeLe1110/aether-shell&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=LeLe1110/aether-shell&type=Date" style="border-radius: 15px; box-shadow: 0 0 30px rgba(0, 217, 255, 0.3);" />
     </picture>
   </a>
 </div>
 
 <p align="center">
   <em> Thanks for visiting ✨ nanobot!</em><br><br>
-  <img src="https://visitor-badge.laobi.icu/badge?page_id=HKUDS.nanobot&style=for-the-badge&color=00d4ff" alt="Views">
+  <img src="https://visitor-badge.laobi.icu/badge?page_id=LeLe1110.aether-shell&style=for-the-badge&color=00d4ff" alt="Views">
 </p>
 
 

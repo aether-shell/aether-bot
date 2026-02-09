@@ -6,7 +6,7 @@
 
 ## 2. 当前仓库关系（摘要）
 - `origin`：你的仓库（LeLe1110/aether-shell）
-- `upstream`：官方仓库（HKUDS/nanobot）
+- `upstream`：官方仓库（LeLe1110/aether-shell）
 - `main`：稳定/发布基线
 - `develop`：日常集成分支
 - 公共基点：`16f6fdf`（`develop` 与 `upstream/main` 的 merge-base）
