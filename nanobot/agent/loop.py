@@ -13,6 +13,12 @@ if TYPE_CHECKING:
     from nanobot.config.schema import ContextConfig, ExecToolConfig
     from nanobot.cron.service import CronService
 
+    ExecToolConfigT = ExecToolConfig
+    ContextConfigT = ContextConfig
+else:
+    ExecToolConfigT = Any
+    ContextConfigT = Any
+
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
@@ -99,12 +105,12 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int = 20,
         brave_api_key: str | None = None,
-        exec_config: "ExecToolConfig" | None = None,
+        exec_config: ExecToolConfigT | None = None,
         cron_service: "CronService" | None = None,
         stream: bool = False,
         stream_min_chars: int = 120,
         stream_min_interval_s: float = 0.5,
-        context_config: "ContextConfig | None" = None,
+        context_config: ContextConfigT | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
     ):
