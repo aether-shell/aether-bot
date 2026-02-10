@@ -1,0 +1,27 @@
+{
+  "$id": "aether.config.base",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Aether Shell Base Config (Phase 1a)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "phase", "artifacts_dir"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["1a"]
+    },
+    "artifacts_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_evidence": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    }
+  }
+}

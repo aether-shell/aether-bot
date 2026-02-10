@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether-shell.local/schemas/config.schema.json",
+  "title": "Aether Shell Phase 1a Config",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["phase"],
+  "properties": {
+    "phase": {
+      "type": "string",
+      "enum": ["1a"]
+    }
+  }
+}

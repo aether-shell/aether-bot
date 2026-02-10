@@ -1,0 +1,5 @@
+schema_version: "0.1"
+phase: "1a"
+artifacts_dir: "./artifacts"
+required_evidence:
+  - "config"
