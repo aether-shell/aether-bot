@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="nanobot_logo.png" alt="Aether Shell" width="380">
+  <img src="aether_poster.png" alt="Aether Shell Poster" width="960">
   <h1>Aether Shell (aether-bot)</h1>
   <p>Self-driven Safe Upgrade Framework</p>
   <p>
