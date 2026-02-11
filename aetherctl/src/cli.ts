@@ -3,6 +3,7 @@
 import { Command } from "commander";
 import { validateAll } from "./commands/validate.js";
 import { run, EXIT_CODES } from "./commands/run.js";
+import { openspecApproveStart, openspecCancel, openspecResume, openspecStatus } from "./commands/openspec.js";
 
 const program = new Command();
 
@@ -87,5 +88,46 @@ program
       }
     }
   );
+
+const openspec = program.command("openspec").description("OpenSpec task-mode control plane");
+
+openspec
+  .command("resume")
+  .description("Resume a paused change after providing required input")
+  .requiredOption("--repo <path>", "Path to repo")
+  .requiredOption("--change <id>", "OpenSpec change id")
+  .requiredOption("--input <text>", "User input to unblock")
+  .option("--by <actor>", "Requested by")
+  .action(async (opts: { repo: string; change: string; input: string; by?: string }) => {
+    await openspecResume({ repoPath: opts.repo, changeId: opts.change, userInput: opts.input, requestedBy: opts.by ?? null });
+  });
+
+openspec
+  .command("approve_start")
+  .description("Approve a planned change and enqueue it for autonomous execution")
+  .requiredOption("--repo <path>", "Path to repo")
+  .requiredOption("--change <id>", "OpenSpec change id")
+  .option("--by <actor>", "Requested by")
+  .action(async (opts: { repo: string; change: string; by?: string }) => {
+    await openspecApproveStart({ repoPath: opts.repo, changeId: opts.change, requestedBy: opts.by ?? null });
+  });
+
+openspec
+  .command("cancel")
+  .description("Cancel a change (idempotent)")
+  .requiredOption("--repo <path>", "Path to repo")
+  .requiredOption("--change <id>", "OpenSpec change id")
+  .action(async (opts: { repo: string; change: string }) => {
+    await openspecCancel({ repoPath: opts.repo, changeId: opts.change });
+  });
+
+openspec
+  .command("status")
+  .description("Get current state for a change")
+  .requiredOption("--repo <path>", "Path to repo")
+  .requiredOption("--change <id>", "OpenSpec change id")
+  .action(async (opts: { repo: string; change: string }) => {
+    await openspecStatus({ repoPath: opts.repo, changeId: opts.change });
+  });
 
 program.parseAsync(process.argv);
