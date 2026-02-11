@@ -330,7 +330,6 @@ def _make_provider(config):
         drop_params=drop_params,
         default_model=model,
         session_mode=session_mode,
-        extra_headers=p.extra_headers if p else None,
         provider_name=config.get_provider_name(),
     )
 
