@@ -1,8 +1,7 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -336,7 +335,6 @@ class Config(BaseSettings):
             if spec and spec.is_gateway and spec.default_api_base:
                 return spec.default_api_base
         return None
-
     def get_api_type(self, model: str | None = None) -> str | None:
         """Get API type for the active provider (e.g. openai-responses)."""
         provider = self.get_provider(model)
@@ -369,6 +367,7 @@ class Config(BaseSettings):
             return mode if mode != "auto" else None
         return None
 
-    class Config:
-        env_prefix = "NANOBOT_"
-        env_nested_delimiter = "__"
+    model_config = ConfigDict(
+        env_prefix="NANOBOT_",
+        env_nested_delimiter="__"
+    )
