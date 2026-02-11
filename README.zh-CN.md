@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="nanobot_logo.png" alt="以太躯壳" width="380">
+  <img src="aether_poster.png" alt="以太躯壳海报" width="960">
   <h1>以太躯壳 (aether-bot)</h1>
   <p>AI 自驱动的安全升级框架</p>
   <p>
