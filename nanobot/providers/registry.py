@@ -241,11 +241,29 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         ),
     ),
 
-    # === Local deployment (fallback: unknown api_base → assume local) ======
+    # MiniMax: needs "minimax/" prefix for LiteLLM routing.
+    # Uses OpenAI-compatible API at api.minimax.io/v1.
+    ProviderSpec(
+        name="minimax",
+        keywords=("minimax",),
+        env_key="MINIMAX_API_KEY",
+        display_name="MiniMax",
+        litellm_prefix="minimax",            # MiniMax-M2.1 → minimax/MiniMax-M2.1
+        skip_prefixes=("minimax/", "openrouter/"),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="https://api.minimax.io/v1",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
+
+    # === Local deployment (matched by config key, NOT by api_base) =========
 
     # vLLM / any OpenAI-compatible local server.
-    # If api_base is set but doesn't match a known gateway, we land here.
-    # Placed before Groq so vLLM wins the fallback when both are configured.
+    # Detected when config key is "vllm" (provider_name="vllm").
     ProviderSpec(
         name="vllm",
         keywords=("vllm",),
@@ -302,16 +320,34 @@ def find_by_model(model: str) -> ProviderSpec | None:
     return None
 
 
-def find_gateway(api_key: str | None, api_base: str | None) -> ProviderSpec | None:
-    """Detect gateway/local by api_key prefix or api_base substring.
-    Fallback: unknown api_base → treat as local (vLLM)."""
+def find_gateway(
+    provider_name: str | None = None,
+    api_key: str | None = None,
+    api_base: str | None = None,
+) -> ProviderSpec | None:
+    """Detect gateway/local provider.
+
+    Priority:
+      1. provider_name — if it maps to a gateway/local spec, use it directly.
+      2. api_key prefix — e.g. "sk-or-" → OpenRouter.
+      3. api_base keyword — e.g. "aihubmix" in URL → AiHubMix.
+
+    A standard provider with a custom api_base (e.g. DeepSeek behind a proxy)
+    will NOT be mistaken for vLLM — the old fallback is gone.
+    """
+    # 1. Direct match by config key
+    if provider_name:
+        spec = find_by_name(provider_name)
+        if spec and (spec.is_gateway or spec.is_local):
+            return spec
+
+    # 2. Auto-detect by api_key prefix / api_base keyword
     for spec in PROVIDERS:
         if spec.detect_by_key_prefix and api_key and api_key.startswith(spec.detect_by_key_prefix):
             return spec
         if spec.detect_by_base_keyword and api_base and spec.detect_by_base_keyword in api_base:
             return spec
-    if api_base:
-        return next((s for s in PROVIDERS if s.is_local), None)
+
     return None
 
 

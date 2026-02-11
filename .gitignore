@@ -20,6 +20,7 @@ poetry.lock
 .DS_Store
 **/.DS_Store
 monitor_llm.log
+botpy.log
 
 # Node
 node_modules/

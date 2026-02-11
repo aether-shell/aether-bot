@@ -23,6 +23,7 @@ class LLMResponse:
     response_id: str | None = None
     conversation_id: str | None = None
     model: str | None = None
+    reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
 
     @property
     def has_tool_calls(self) -> bool:

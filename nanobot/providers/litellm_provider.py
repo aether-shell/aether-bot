@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
-
-    Supports OpenRouter, Anthropic, OpenAI, Gemini, and many other providers through
+    Supports OpenRouter, Anthropic, OpenAI, Gemini, MiniMax, and many other providers through
     a unified interface.  Provider-specific logic is driven by the registry
     (see providers/registry.py) — no if-elif chains needed here.
     """
@@ -37,6 +36,7 @@ class LiteLLMProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
         session_mode: str | None = None,
+        provider_name: str | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
@@ -49,8 +49,10 @@ class LiteLLMProvider(LLMProvider):
         # Runtime flag: set to True when API rejects previous_response_id
         self._native_session_disabled = False
 
-        # Detect gateway / local deployment from api_key and api_base
-        self._gateway = find_gateway(api_key, api_base)
+        # Detect gateway / local deployment.
+        # provider_name (from config key) is the primary signal;
+        # api_key / api_base are fallback for auto-detection.
+        self._gateway = find_gateway(provider_name, api_key, api_base)
 
         # Backwards-compatible flags (used by tests and possibly external code)
         self.is_openrouter = bool(self._gateway and self._gateway.name == "openrouter")
@@ -72,26 +74,29 @@ class LiteLLMProvider(LLMProvider):
 
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
+        # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
+        litellm.drop_params = True
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
-        if self._gateway:
-            # Gateway / local: direct set (not setdefault)
-            os.environ[self._gateway.env_key] = api_key
+        spec = self._gateway or find_by_model(model)
+        if not spec:
             return
 
-        # Standard provider: match by model name
-        spec = find_by_model(model)
-        if spec:
+        # Gateway/local overrides existing env; standard provider doesn't
+        if self._gateway:
+            os.environ[spec.env_key] = api_key
+        else:
             os.environ.setdefault(spec.env_key, api_key)
-            # Resolve env_extras placeholders:
-            #   {api_key}  → user's API key
-            #   {api_base} → user's api_base, falling back to spec.default_api_base
-            effective_base = api_base or spec.default_api_base
-            for env_name, env_val in spec.env_extras:
-                resolved = env_val.replace("{api_key}", api_key)
-                resolved = resolved.replace("{api_base}", effective_base)
-                os.environ.setdefault(env_name, resolved)
+
+        # Resolve env_extras placeholders:
+        #   {api_key}  → user's API key
+        #   {api_base} → user's api_base, falling back to spec.default_api_base
+        effective_base = api_base or spec.default_api_base
+        for env_name, env_val in spec.env_extras:
+            resolved = env_val.replace("{api_key}", api_key)
+            resolved = resolved.replace("{api_base}", effective_base)
+            os.environ.setdefault(env_name, resolved)
 
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
@@ -225,7 +230,12 @@ class LiteLLMProvider(LLMProvider):
             kwargs["temperature"] = temperature
             # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
             self._apply_model_overrides(model, kwargs)
-        # Pass api_base directly for custom endpoints (vLLM, etc.)
+
+        # Pass api_key directly — more reliable than env vars alone
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        # Pass api_base for custom endpoints
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if tools:
@@ -684,6 +694,8 @@ class LiteLLMProvider(LLMProvider):
         if response_id and not response_id.startswith("resp_"):
             response_id = None
 
+        reasoning_content = getattr(message, "reasoning_content", None)
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
@@ -692,6 +704,7 @@ class LiteLLMProvider(LLMProvider):
             response_id=response_id,
             conversation_id=conversation_id,
             model=model,
+            reasoning_content=reasoning_content,
         )
 
     def _parse_responses_response(self, response: Any) -> LLMResponse:

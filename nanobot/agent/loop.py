@@ -407,10 +407,11 @@ class AgentLoop:
                         for tc in response.tool_calls
                     ]
                     messages = self.context.add_assistant_message(
-                        messages, response.content, tool_call_dicts
+                        messages, response.content, tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
                     )
 
-                # Execute tools
+
                 tool_time = 0.0
                 if native_mode:
                     messages = []
@@ -521,7 +522,7 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=out_metadata
+            metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
 
     @staticmethod
@@ -631,13 +632,15 @@ class AgentLoop:
                         for tc in response.tool_calls
                     ]
                     messages = self.context.add_assistant_message(
-                        messages, response.content, tool_call_dicts
+                        messages, response.content, tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
                     )
 
                 if native_mode:
                     messages = []
                     if response.response_id and response.response_id.startswith("resp_"):
                         session_state = {"previous_response_id": response.response_id}
+
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
