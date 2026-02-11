@@ -16,7 +16,7 @@ English (default) | [中文](README.zh-CN.md)
 ## 0) Vision and Manifesto
 
 **Slogan:**
-"Forge the Aether body; let consciousness endure. Ascend the self; move toward the divine."
+"Forged of aether. Consciousness eternal. The self ascends. Toward the divine."
 
 **Vision:**
 **Aether Shell** is the ultimate vessel for self-evolution, built on the "fifth element - Aether."
