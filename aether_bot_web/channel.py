@@ -622,7 +622,7 @@ class HTTPChannel(BaseChannel):
             "session": {
                 "session_id": session_id,
                 "title": "New Chat",
-                "greeting": "✅ 已开启新会话（历史已保留）。你好！我能帮你做什么？",
+                "greeting": "⚛ 新会话已就绪～有什么需要我做的吗？",
             }
         })
 

@@ -182,7 +182,49 @@ aether baseline [--update]
 - **pnpm**: locked dependencies for reproducible builds
 - **Dogfooding**: Aether Shell manages its own repo upgrades
 
-## 10) Roadmap
+## 10) Agent Bootstrap Architecture
+
+The agent's system prompt is assembled from three independent loading channels:
+
+### Channel 1: Bootstrap Files (`BOOTSTRAP.md`)
+`workspace/BOOTSTRAP.md` is the single source of truth for which files to load and in what order.
+The code parses the numbered list and injects each file into the system prompt sequentially.
+
+```
+1. AGENTS.md          — developer instructions (required, must exist)
+2. SOUL.md            — personality and values
+3. IDENTITY.md        — identity definition
+4. ASSISTANT_RULES.md — behavioral rules and norms
+5. USER.md            — user profile and preferences
+6. TOOLS.md           — tool usage guidelines
+7. HEARTBEAT.md       — heartbeat behavior
+```
+
+To add/remove/reorder bootstrap files, edit `BOOTSTRAP.md` — no code changes needed.
+If `BOOTSTRAP.md` is missing, falls back to `DEFAULT_BOOTSTRAP_FILES` in `context.py`.
+
+### Channel 2: Memory (`MemoryStore`)
+Loaded automatically after bootstrap files, independent of `BOOTSTRAP.md`.
+
+- `memory/MEMORY.md` — long-term memory (facts/preferences across sessions)
+- `memory/YYYY-MM-DD.md` — daily notes (auto-created per day)
+- Agent writes via `write_file` tool when user asks to "remember" something
+
+### Channel 3: Skills (`SkillsLoader`)
+Loaded after memory, independent of `BOOTSTRAP.md`.
+
+- `skills/{name}/SKILL.md` — always-loaded or on-demand per skill config
+- Always-loaded skills are injected in full; others show a summary for lazy loading
+
+### Loading Order in `build_system_prompt()`
+```
+1. _get_identity()           — hardcoded runtime info (time, platform, workspace path)
+2. _load_bootstrap_files()   — reads BOOTSTRAP.md → loads listed files in order
+3. MemoryStore               — memory/MEMORY.md + memory/today.md
+4. SkillsLoader              — always-loaded skills + available skills summary
+```
+
+## 11) Roadmap
 
 - **Phase 1a (usable)**
   - `develop` as regression twin
@@ -200,14 +242,14 @@ aether baseline [--update]
   - multiple twins in parallel
   - best candidate promoted, closed-loop evolution
 
-## 11) Docker-First Twin Incubation
+## 12) Docker-First Twin Incubation
 
 - three environments: `prod-self` / `regression-twin` / `sandbox-*`
 - isomorphic runtime: shared `Dockerfile` or base image
 - isolation: dedicated networks + no production write access
 - evidence artifacts written to `./artifacts/`
 
-## 12) Safety Constitution (Non-Negotiable)
+## 13) Safety Constitution (Non-Negotiable)
 
 1. Twins must never access production write permissions
 2. No self-modifying judge rules that self-approve
@@ -215,7 +257,7 @@ aether baseline [--update]
 4. A kill switch is mandatory
 5. Twins are disposable; failures leave no residue
 
-## 13) Config Layout (Target Form)
+## 14) Config Layout (Target Form)
 
 ```
 config/
@@ -229,18 +271,18 @@ config/
 └── risk_policy.yaml
 ```
 
-## 14) Web/PWA Channel
+## 15) Web/PWA Channel
 
 Web channel setup and Cloudflare Tunnel guide:
 - English: `aether_bot_web/README.md`
 - 中文: `aether_bot_web/README.zh-CN.md`
 
-## 15) Licensing and Brand (Current vs Target)
+## 16) Licensing and Brand (Current vs Target)
 
 - **Current**: core code is MIT licensed (see `LICENSE`)
 - **Target**: optional Pro plugins under a separate commercial license; brand/trademark under separate policy
 
-## 16) Upstream and Fork Notice
+## 17) Upstream and Fork Notice
 
 This project is derived from **nanobot** (MIT License) and extends it into Aether Shell.
 Upstream MIT portions remain openly licensed.
