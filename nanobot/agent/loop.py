@@ -837,6 +837,12 @@ class AgentLoop:
         if last_response is not None:
             self.context_manager.update_after_response(session, last_response)
 
+        if final_content is None:
+            if iteration >= self.max_iterations:
+                final_content = f"Reached {self.max_iterations} iterations without completion."
+            else:
+                final_content = "I've completed processing but have no response to give."
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Trace {trace_id} response to {msg.channel}:{msg.sender_id}: {preview}")
