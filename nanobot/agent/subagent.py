@@ -105,6 +105,7 @@ class SubagentManager:
             allowed_dir = self.workspace if self.restrict_to_workspace else None
             tools.register(ReadFileTool(allowed_dir=allowed_dir))
             tools.register(WriteFileTool(allowed_dir=allowed_dir))
+            tools.register(EditFileTool(allowed_dir=allowed_dir))
             tools.register(ListDirTool(allowed_dir=allowed_dir))
             tools.register(ExecTool(
                 working_dir=str(self.workspace),
@@ -229,12 +230,17 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
+        from datetime import datetime
+        import time as _time
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
+
         return f"""# Subagent
 
-You are a subagent spawned by the main agent to complete a specific task.
+## Current Time
+{now} ({tz})
 
-## Your Task
-{task}
+You are a subagent spawned by the main agent to complete a specific task.
 
 ## Rules
 1. Stay focused - complete only the assigned task, nothing else
@@ -255,6 +261,7 @@ You are a subagent spawned by the main agent to complete a specific task.
 
 ## Workspace
 Your workspace is at: {self.workspace}
+Skills are available at: {self.workspace}/skills/ (read SKILL.md files as needed)
 
 When you have completed the task, provide a clear summary of your findings or actions."""
 
