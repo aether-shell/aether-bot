@@ -106,6 +106,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 20,
+        temperature: float = 0.7,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfigT | None = None,
         cron_service: "CronService" | None = None,
@@ -122,6 +123,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
+        self.temperature = temperature
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -654,6 +656,7 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
+                temperature=self.temperature
             )
             last_response = response
             llm_time = time.monotonic() - t_llm
@@ -1066,6 +1069,7 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
+                temperature=self.temperature
             )
             last_response = response
             self._log_response_for_trace(trace_id, f"system iteration={iteration} response", response)
