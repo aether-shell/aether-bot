@@ -411,13 +411,25 @@ body::after {
 .session-icon {
     width: 40px;
     height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    flex: 0 0 40px;
     border-radius: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: var(--surface-soft);
     color: var(--primary-dark);
-    font-size: 20px;
+}
+.session-icon svg {
+    width: 20px;
+    height: 20px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.7;
+}
+.session-icon svg .sparkle {
+    stroke-width: 1.4;
 }
 
 .session-info {
@@ -735,6 +747,18 @@ body::after {
 }
 
 .message.user .msg-name {
+    text-align: right;
+    margin-left: 0;
+    margin-right: 6px;
+}
+
+.msg-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 6px;
+}
+
+.message.user .msg-time {
     text-align: right;
     margin-left: 0;
     margin-right: 6px;

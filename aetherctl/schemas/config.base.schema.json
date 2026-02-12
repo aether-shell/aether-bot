@@ -2,6 +2,7 @@
   "$id": "aether.config.base",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Aether Shell Base Config (Phase 1a)",
+  "description": "Strict base config schema with additionalProperties:false. Used for validating config.base.yaml files. The looser config.schema.json is used for general config YAML files.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "phase", "artifacts_dir"],

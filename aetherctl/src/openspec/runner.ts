@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,6 +11,7 @@ import {
   sanitizeEnv,
   safePath,
   sanitizePathComponent,
+  MAX_CMD_BUFFER_SIZE,
   MAX_TASKS_FILE_SIZE,
   MAX_TASK_COUNT,
   MAX_LINE_LENGTH,
@@ -115,7 +116,7 @@ export async function runChange(repoPath: string, changeId: string): Promise<Run
         // Execute without shell, with sanitized environment
         const { stdout, stderr } = await pExecFile(command, args, {
           cwd: repoPath,
-          maxBuffer: 50 * 1024 * 1024, // 50MB
+          maxBuffer: MAX_CMD_BUFFER_SIZE,
           shell: false, // Critical: disable shell to prevent injection
           env: sanitizeEnv(process.env),
           timeout: 300000, // 5 minutes per command
@@ -234,12 +235,7 @@ async function atomicWriteText(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
   await writeFile(tmp, content.endsWith("\n") ? content : content + "\n", "utf8");
-  await renameFile(tmp, path);
-}
-
-async function renameFile(tmp: string, dest: string): Promise<void> {
-  const { rename } = await import("node:fs/promises");
-  await rename(tmp, dest);
+  await rename(tmp, path);
 }
 
 async function log(repoPath: string, changeId: string, runId: string | null, msg: string): Promise<void> {

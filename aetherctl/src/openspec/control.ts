@@ -130,7 +130,8 @@ export async function resumeChange(opts: {
   const changeId = opts.changeId;
 
   const st = await ensureState(repoPath, changeId);
-  if (["DONE", "CANCELLED", "FAILED"].includes(st.status)) return { ok: true, status: st.status };
+  if (["DONE", "CANCELLED"].includes(st.status)) return { ok: true, status: st.status };
+  if (st.status === "FAILED") return { ok: false, error: "Change already FAILED" };
   if (st.status !== "PAUSED_UNEXPECTED") return { ok: false, error: `Change not in PAUSED_UNEXPECTED (current: ${st.status})` };
   if (!st.blocked.pause.request) return { ok: false, error: "No pause request present" };
 

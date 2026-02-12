@@ -17,6 +17,10 @@ export const ALLOWED_COMMANDS = [
   "go",
   "mvn",
   "gradle",
+  "claude",
+  "codex",
+  "gemini",
+  "opencode",
 ];
 
 export const MAX_TASKS_FILE_SIZE = 1024 * 1024; // 1MB
@@ -81,12 +85,16 @@ export function validateCommand(cmd: string): { command: string; args: string[] 
 
   const trimmed = cmd.trim();
 
-  // Check for shell injection patterns
+  // Check for shell injection patterns (relaxed to allow AI-CLI tools)
   const dangerousPatterns = [
-    /[;&|`$()]/g, // Shell metacharacters
-    /\n|\r/g, // Newlines
-    />\s*\/dev/g, // Device access
-    /rm\s+-rf\s+\//g, // Destructive commands
+    /;/, // Command chaining via semicolon
+    /&&/, // Logical AND chaining
+    /\|\|/, // Logical OR chaining
+    /`/, // Backtick substitution
+    /\$\(/, // Subshell substitution
+    /\n|\r/, // Newlines
+    />\s*\/dev/, // Device access
+    /rm\s+-rf\s+\//, // Destructive commands
   ];
 
   for (const pattern of dangerousPatterns) {

@@ -1,0 +1,55 @@
+name: Incubation
+
+on:
+  pull_request:
+    branches: [develop]
+
+jobs:
+  incubate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aetherctl
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Validate config
+        run: pnpm run validate --config ../config
+
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Run incubation (dry-run)
+        run: |
+          node dist/cli.js incubate ${{ github.head_ref }} \
+            --type feature \
+            --risk low \
+            --dry-run \
+            --format jsonl
+        env:
+          AETHER_PHASE: "1a"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incubation-artifacts
+          path: aetherctl/.aether/artifacts/
+          if-no-files-found: ignore

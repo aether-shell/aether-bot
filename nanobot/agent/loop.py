@@ -24,6 +24,7 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.context_manager import ContextManager
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.claude import ClaudeTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -170,6 +171,9 @@ class AgentLoop:
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
+
+        # Claude tool (Claude Code runner wrapper)
+        self.tools.register(ClaudeTool())
 
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
@@ -434,8 +438,33 @@ class AgentLoop:
                     final_streamed = stream_state.sent_any
                 break
 
+        # When the agent exhausted iterations without producing a text reply,
+        # make one final LLM call without tools to force a summary response.
         if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            logger.info(f"Max iterations reached without text reply, forcing summary call for {msg.channel}:{msg.sender_id}")
+            stream_state = None
+            on_delta = None
+            if self._should_stream(msg.channel):
+                stream_state = self._create_stream_state(msg)
+                on_delta = stream_state.on_delta
+
+            t_llm = time.monotonic()
+            summary_response = await self.provider.chat(
+                messages=messages,
+                tools=[],
+                model=self.model,
+                session_state=session_state,
+                on_delta=on_delta,
+            )
+            llm_total += time.monotonic() - t_llm
+            if stream_state:
+                await stream_state.flush(final=True)
+                if stream_state.sent_any:
+                    final_streamed = True
+
+            final_content = summary_response.content or ""
+            if summary_response.response_id and summary_response.response_id.startswith("resp_"):
+                last_response = summary_response
 
         # Update session with LLM context info
         if last_response is not None:
@@ -458,7 +487,8 @@ class AgentLoop:
                 if sent.get("media"):
                     kwargs["media"] = sent["media"]
                 session.add_message("assistant", sent["content"], **kwargs)
-        session.add_message("assistant", final_content)
+        if final_content:
+            session.add_message("assistant", final_content)
         self.sessions.save(session)
         save_time = time.monotonic() - t_save
 
@@ -654,15 +684,46 @@ class AgentLoop:
                     final_streamed = stream_state.sent_any
                 break
 
+        # When the agent exhausted iterations without producing a text reply,
+        # make one final LLM call without tools to force a summary response.
         if final_content is None:
-            final_content = "Background task completed."
+            logger.info(f"Max iterations reached without text reply, forcing summary call for system:{msg.sender_id}")
+            stream_state = None
+            on_delta = None
+            if self._should_stream(origin_channel):
+                stream_state = _StreamState(
+                    bus=self.bus,
+                    channel=origin_channel,
+                    chat_id=origin_chat_id,
+                    base_metadata=msg.metadata,
+                    min_chars=self.stream_min_chars,
+                    min_interval_s=self.stream_min_interval_s,
+                )
+                on_delta = stream_state.on_delta
+
+            summary_response = await self.provider.chat(
+                messages=messages,
+                tools=[],
+                model=self.model,
+                session_state=session_state,
+                on_delta=on_delta,
+            )
+            if stream_state:
+                await stream_state.flush(final=True)
+                if stream_state.sent_any:
+                    final_streamed = True
+
+            final_content = summary_response.content or ""
+            if summary_response.response_id and summary_response.response_id.startswith("resp_"):
+                last_response = summary_response
 
         if last_response is not None:
             self.context_manager.update_after_response(session, last_response)
 
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
+        if final_content:
+            session.add_message("assistant", final_content)
         self.sessions.save(session)
 
         if final_streamed:

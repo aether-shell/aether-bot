@@ -1,0 +1,2 @@
+# Production Self (main) overrides
+artifacts_dir: "artifacts/prod"

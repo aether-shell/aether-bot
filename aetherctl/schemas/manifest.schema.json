@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether-bot.local/schemas/manifest.schema.json",
+  "title": "Aether Shell Incubation Manifest",
+  "type": "object",
+  "required": [
+    "incubation_id", "created_at", "phase", "id_composition",
+    "schema_registry", "required_evidence", "artifacts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "incubation_id": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "phase": { "type": "string", "enum": ["1a", "1b", "2", "3"] },
+    "id_composition": {
+      "type": "object",
+      "required": ["branch", "base_sha", "timestamp", "run_seq"],
+      "additionalProperties": false,
+      "properties": {
+        "branch": { "type": "string", "minLength": 1 },
+        "base_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "timestamp": { "type": "string", "pattern": "^\\d{8}$" },
+        "run_seq": { "type": "string", "pattern": "^\\d{3}$" }
+      }
+    },
+    "schema_registry": {
+      "type": "object",
+      "required": ["manifest", "freeze", "integration", "test_result", "judge_report"],
+      "additionalProperties": false,
+      "properties": {
+        "manifest": { "type": "string", "minLength": 1 },
+        "freeze": { "type": "string", "minLength": 1 },
+        "integration": { "type": "string", "minLength": 1 },
+        "test_result": { "type": "string", "minLength": 1 },
+        "benchmark": { "type": "string" },
+        "judge_report": { "type": "string", "minLength": 1 }
+      }
+    },
+    "required_evidence": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "schema", "sha256", "produced_by", "produced_at"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "schema": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "produced_by": { "type": "string", "minLength": 1 },
+          "produced_at": { "type": "string", "format": "date-time" },
+          "source_format": { "type": "string" }
+        }
+      }
+    },
+    "manifest_signature": { "type": ["string", "null"] }
+  }
+}

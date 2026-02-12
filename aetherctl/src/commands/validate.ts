@@ -54,11 +54,14 @@ function isWithinDir(rootDir: string, candidatePath: string): boolean {
 export async function validateAll(opts: {
   configDir: string;
   artifactsDir?: string;
+  schemaDir?: string;
 }): Promise<ValidateResult> {
   const errors: Diagnostic[] = [];
 
   const configDir = path.resolve(opts.configDir);
-  const schemaDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../schemas");
+  const schemaDir = opts.schemaDir
+    ? path.resolve(opts.schemaDir)
+    : path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../schemas");
 
   if (!fs.existsSync(configDir)) {
     return { ok: false, errors: [diag("error", "CONFIG_DIR_MISSING", `Config directory not found: ${configDir}`)] };
@@ -78,9 +81,7 @@ export async function validateAll(opts: {
   }
 
   const configSchema = JSON.parse(fs.readFileSync(configSchemaPath, "utf8"));
-  const validateConfig = ajv.compile(configSchema) as unknown as ((data: unknown) => boolean) & {
-    errors?: unknown;
-  };
+  const validateConfig = ajv.compile(configSchema);
 
   const files = listYamlFiles(configDir);
   if (files.length === 0) {
@@ -147,9 +148,7 @@ export async function validateAll(opts: {
           } else {
             try {
               const manifestSchema = JSON.parse(fs.readFileSync(manifestSchemaPath, "utf8"));
-              const validateManifest = ajv.compile(manifestSchema) as unknown as ((data: unknown) => boolean) & {
-                errors?: unknown;
-              };
+              const validateManifest = ajv.compile(manifestSchema);
               const ok = validateManifest(manifest);
               if (!ok) {
                 errors.push(
