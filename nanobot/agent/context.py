@@ -4,6 +4,7 @@ import base64
 import hashlib
 import mimetypes
 import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +20,34 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    DEFAULT_BOOTSTRAP_FILES = [
+        "AGENTS.md",
+        "SOUL.md",
+        "IDENTITY.md",
+        "ASSISTANT_RULES.md",
+        "USER.md",
+        "TOOLS.md",
+        "HEARTBEAT.md",
+    ]
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+
+    @property
+    def BOOTSTRAP_FILES(self) -> list[str]:
+        """Load bootstrap file list from BOOTSTRAP.md, fall back to defaults."""
+        bootstrap_path = self.workspace / "BOOTSTRAP.md"
+        if not bootstrap_path.exists():
+            return self.DEFAULT_BOOTSTRAP_FILES
+        try:
+            content = bootstrap_path.read_text(encoding="utf-8")
+            # Match numbered list items like "1. SOUL.md"
+            files = re.findall(r"^\d+\.\s+(\S+\.md)\s*$", content, re.MULTILINE)
+            return files if files else self.DEFAULT_BOOTSTRAP_FILES
+        except Exception:
+            return self.DEFAULT_BOOTSTRAP_FILES
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
@@ -80,9 +103,9 @@ Skills with available="false" need dependencies installed first - you can try in
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# nanobot 🐈
+        return f"""# AetherBot ⚛
 
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
+You are AetherBot, an autonomous AI agent. You have access to tools that allow you to:
 - Read, write, and edit files
 - Execute shell commands
 - Search the web and fetch web pages
@@ -141,6 +164,14 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
             )
 
         hasher = hashlib.sha256()
+
+        # Include BOOTSTRAP.md itself so order changes trigger reset
+        bootstrap_path = self.workspace / "BOOTSTRAP.md"
+        if bootstrap_path.exists():
+            hasher.update(b"BOOTSTRAP.md\0")
+            hasher.update(bootstrap_path.read_bytes())
+            hasher.update(b"\0")
+
         for filename in self.BOOTSTRAP_FILES:
             file_path = self.workspace / filename
             if not file_path.exists():

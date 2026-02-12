@@ -179,7 +179,49 @@ aether baseline [--update]
 - **pnpm**：锁定依赖，确保可复现构建
 - **Dogfooding**：用以太躯壳管理自身仓库的升级流程
 
-## 10) 阶段路线图
+## 10) Agent 启动架构
+
+Agent 的 system prompt 由三条独立加载通道组装而成：
+
+### 通道一：Bootstrap 文件（`BOOTSTRAP.md`）
+`workspace/BOOTSTRAP.md` 是加载文件列表和顺序的唯一配置源。
+代码解析其中的编号列表，按顺序注入 system prompt。
+
+```
+1. AGENTS.md          — 开发者指令（必须存在）
+2. SOUL.md            — 人格与价值观
+3. IDENTITY.md        — 身份定义
+4. ASSISTANT_RULES.md — 行为规范与准则
+5. USER.md            — 用户画像与偏好
+6. TOOLS.md           — 工具使用指南
+7. HEARTBEAT.md       — 心跳行为
+```
+
+增删或调整顺序只需编辑 `BOOTSTRAP.md`，无需改代码。
+若 `BOOTSTRAP.md` 不存在，回退到 `context.py` 中的 `DEFAULT_BOOTSTRAP_FILES`。
+
+### 通道二：Memory（`MemoryStore`）
+在 bootstrap 文件之后自动加载，独立于 `BOOTSTRAP.md`。
+
+- `memory/MEMORY.md` — 长期记忆（跨会话保留的事实与偏好）
+- `memory/YYYY-MM-DD.md` — 每日笔记（按天自动创建）
+- Agent 通过 `write_file` 工具写入，用户说"记住"时触发
+
+### 通道三：Skills（`SkillsLoader`）
+在 memory 之后加载，独立于 `BOOTSTRAP.md`。
+
+- `skills/{name}/SKILL.md` — 常驻加载或按需加载（取决于技能配置）
+- 常驻技能全量注入；其余仅展示摘要，由 agent 按需读取
+
+### `build_system_prompt()` 加载顺序
+```
+1. _get_identity()           — 硬编码的运行时信息（时间、平台、workspace 路径）
+2. _load_bootstrap_files()   — 读取 BOOTSTRAP.md → 按列表顺序加载文件
+3. MemoryStore               — memory/MEMORY.md + memory/当天.md
+4. SkillsLoader              — 常驻技能 + 可用技能摘要
+```
+
+## 11) 阶段路线图
 
 - **Phase 1a（可用）**
   - `develop` 作为回归分身
@@ -197,14 +239,14 @@ aether baseline [--update]
   - 多分身并行竞赛
   - 优胜晋升，形成闭环自我进化
 
-## 11) Docker-First Twin Incubation
+## 12) Docker-First Twin Incubation
 
 - 三层环境：`prod-self` / `regression-twin` / `sandbox-*`
 - 同构：共享同一份 `Dockerfile` 或基础镜像
 - 隔离：独立网络 + 禁止生产写权限
 - 证据产物统一写入 `./artifacts/`
 
-## 12) 安全宪法（不可违反）
+## 13) 安全宪法（不可违反）
 
 1. 禁止分身访问生产写权限资源
 2. 禁止“自我修改裁决规则并自证通过”
@@ -212,7 +254,7 @@ aether baseline [--update]
 4. 必须保留紧急 kill switch
 5. 分身可销毁，失败一键回收
 
-## 13) 配置结构（目标形态）
+## 14) 配置结构（目标形态）
 
 ```
 config/
@@ -226,18 +268,18 @@ config/
 └── risk_policy.yaml
 ```
 
-## 14) Web/PWA 渠道
+## 15) Web/PWA 渠道
 
 Web 渠道使用与 Cloudflare Tunnel 接入说明：
 - English: `aether_bot_web/README.md`
 - 中文: `aether_bot_web/README.zh-CN.md`
 
-## 15) 许可与品牌（当前与目标）
+## 16) 许可与品牌（当前与目标）
 
 - **当前**：核心代码采用 MIT License（见 `LICENSE`）
 - **目标**：可选 Pro 插件采用独立商业授权；品牌/商标使用独立政策
 
-## 16) Upstream & Fork Notice
+## 17) Upstream & Fork Notice
 
 本项目源自 **nanobot**（MIT License）并在其基础上扩展为以太躯壳。
 上游 MIT 部分保持开放授权。
