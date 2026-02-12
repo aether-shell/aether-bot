@@ -173,8 +173,8 @@ You are AetherBot, an autonomous AI agent. You have access to tools that allow y
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Memory files: {workspace_path}/memory/MEMORY.md
-- Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
+- Long-term memory: {workspace_path}/memory/MEMORY.md
+- History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 IMPORTANT:
@@ -185,9 +185,9 @@ IMPORTANT:
 Feishu support: when asked to send files or images, use the 'message' tool with the `media` field.
 This supports local file paths or URLs and will send real attachments.
 
-Always be helpful, accurate, and concise. When using tools, explain what you're doing.
-When remembering something, write to {workspace_path}/memory/MEMORY.md"""
-
+Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
+When remembering something important, write to {workspace_path}/memory/MEMORY.md
+To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         t_start = time.monotonic()
