@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether-bot.local/schemas/adapter-output.schema.json",
+  "title": "Aether Shell Artifact Adapter Output",
+  "type": "object",
+  "required": ["adapter_version", "source_format", "source_file", "converted_at", "result"],
+  "additionalProperties": false,
+  "properties": {
+    "adapter_version": { "type": "string", "minLength": 1 },
+    "source_format": { "type": "string", "enum": ["junit_xml", "json", "tap", "custom"] },
+    "source_file": { "type": "string", "minLength": 1 },
+    "converted_at": { "type": "string", "format": "date-time" },
+    "result": {
+      "type": "object",
+      "required": ["pass", "total", "passed", "failed", "skipped", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "pass": { "type": "boolean" },
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "number", "minimum": 0 },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "message"],
+            "properties": {
+              "name": { "type": "string" },
+              "message": { "type": "string" },
+              "stacktrace": { "type": "string" }
+            }
+          },
+          "default": []
+        }
+      }
+    }
+  }
+}

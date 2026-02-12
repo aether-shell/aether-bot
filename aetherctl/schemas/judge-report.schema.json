@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether-bot.local/schemas/judge-report.schema.json",
+  "title": "Aether Shell Judge Report",
+  "type": "object",
+  "required": [
+    "incubation_id", "timestamp", "phase", "change_summary",
+    "risk_level", "verification", "decision", "evidence_artifact_paths"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "incubation_id": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "phase": { "type": "string", "enum": ["1a", "1b", "2", "3"] },
+    "change_summary": {
+      "type": "object",
+      "required": ["source_branch", "change_type", "files_changed", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "source_branch": { "type": "string", "minLength": 1 },
+        "change_type": { "type": "string", "enum": ["feature", "bugfix", "dependency", "upstream", "refactor"] },
+        "files_changed": { "type": "array", "items": { "type": "string" } },
+        "description": { "type": "string" }
+      }
+    },
+    "risk_level": { "type": "string", "enum": ["low", "medium", "high"] },
+    "risk_classification_reason": { "type": "string" },
+    "risk_overridden": { "type": "boolean", "default": false },
+    "baseline": {
+      "type": ["object", "null"],
+      "properties": {
+        "main_sha": { "type": "string" },
+        "lockfile_hash": { "type": "string" },
+        "schema_version": { "type": "string" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["lint", "unit_tests"],
+      "additionalProperties": false,
+      "properties": {
+        "lint": {
+          "type": "object",
+          "required": ["pass"],
+          "additionalProperties": false,
+          "properties": {
+            "pass": { "type": "boolean" },
+            "errors": { "type": "integer", "minimum": 0 },
+            "warnings": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "unit_tests": { "$ref": "#/$defs/testVerification" },
+        "integration_tests": { "$ref": "#/$defs/testVerification" },
+        "e2e_tests": { "$ref": "#/$defs/nullableTestVerification" },
+        "resilience": {
+          "type": ["object", "null"],
+          "properties": {
+            "pass": { "type": ["boolean", "null"] },
+            "details": {}
+          }
+        }
+      }
+    },
+    "comparison": {
+      "type": ["object", "null"],
+      "properties": {
+        "functionality_delta_pct": { "type": "number" },
+        "error_rate_delta": { "type": "number" },
+        "p95_latency_delta_pct": { "type": "number" },
+        "security_critical_count": { "type": "integer", "minimum": 0 },
+        "cost_delta_pct": { "type": "number" }
+      }
+    },
+    "migration": {
+      "type": ["object", "null"],
+      "properties": {
+        "has_schema_change": { "type": "boolean" },
+        "reversible": { "type": "boolean" },
+        "rollback_sql": { "type": ["string", "null"] }
+      }
+    },
+    "decision": { "type": "string", "enum": ["promote", "reject"] },
+    "rejection_reasons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "fix_suggestions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "conflict_notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "evidence_artifact_paths": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "testVerification": {
+      "type": "object",
+      "required": ["pass", "total", "passed", "failed", "skipped", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "pass": { "type": "boolean" },
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "nullableTestVerification": {
+      "type": ["object", "null"],
+      "properties": {
+        "pass": { "type": ["boolean", "null"] },
+        "total": { "type": ["integer", "null"], "minimum": 0 },
+        "passed": { "type": ["integer", "null"], "minimum": 0 },
+        "failed": { "type": ["integer", "null"], "minimum": 0 },
+        "skipped": { "type": ["integer", "null"], "minimum": 0 },
+        "duration_ms": { "type": ["number", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

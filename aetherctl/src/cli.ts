@@ -4,6 +4,11 @@ import { Command } from "commander";
 import { validateAll } from "./commands/validate.js";
 import { run, EXIT_CODES } from "./commands/run.js";
 import { openspecApproveStart, openspecCancel, openspecResume, openspecStatus } from "./commands/openspec.js";
+import { incubate } from "./commands/incubate.js";
+import { status, listIncubations } from "./commands/status.js";
+import { listArtifacts } from "./commands/artifacts.js";
+import { readBaseline, updateBaseline } from "./commands/baseline.js";
+import { EXIT } from "./commands/exit-codes.js";
 
 const program = new Command();
 
@@ -89,6 +94,142 @@ program
     }
   );
 
+// --- Phase 1a incubation commands ---
+
+program
+  .command("incubate")
+  .description("Start or resume an incubation pipeline")
+  .argument("<branch>", "Source branch to incubate")
+  .option("--config <path>", "Path to config directory", "config")
+  .option("--risk <level>", "Risk level: low|medium|high", "low")
+  .option("--type <type>", "Change type: feature|bugfix|refactor|dependency", "feature")
+  .option("--force-restart", "Force restart from scratch")
+  .option("--dry-run", "Dry run (skip actual promote)")
+  .option("--format <format>", "Output format: human|jsonl", "human")
+  .action(
+    async (branch: string, opts: { config: string; risk: string; type: string; forceRestart?: boolean; dryRun?: boolean; format: "human" | "jsonl" }) => {
+      const res = await incubate({
+        branch,
+        configDir: opts.config,
+        risk: opts.risk as any,
+        type: opts.type as any,
+        forceRestart: opts.forceRestart,
+        dryRun: opts.dryRun,
+        format: opts.format,
+      });
+
+      if (!res.ok) {
+        if (opts.format === "jsonl") {
+          process.stdout.write(JSON.stringify({ level: "error", error: res.error }) + "\n");
+        } else {
+          console.error(res.error);
+        }
+        process.exit(res.exitCode);
+      }
+
+      if (opts.format === "jsonl") {
+        process.stdout.write(JSON.stringify({ level: "info", incubation_id: res.incubationId, status: res.status }) + "\n");
+      } else {
+        console.log(`Incubation ${res.incubationId}: ${res.status}`);
+      }
+    }
+  );
+
+program
+  .command("status")
+  .description("Show incubation status")
+  .argument("[id]", "Incubation ID (omit to list all)")
+  .option("--artifacts-dir <path>", "Artifacts directory", ".aether/artifacts")
+  .option("--format <format>", "Output format: human|jsonl", "human")
+  .action(
+    (id: string | undefined, opts: { artifactsDir: string; format: "human" | "jsonl" }) => {
+      if (id) {
+        const res = status({ artifactsDir: opts.artifactsDir, incubationId: id });
+        if (!res.ok) {
+          if (opts.format === "jsonl") {
+            process.stdout.write(JSON.stringify({ level: "error", error: res.error }) + "\n");
+          } else {
+            console.error(res.error);
+          }
+          process.exit(1);
+        }
+        if (opts.format === "jsonl") {
+          process.stdout.write(JSON.stringify(res.state) + "\n");
+        } else {
+          console.log(JSON.stringify(res.state, null, 2));
+        }
+      } else {
+        const list = listIncubations(opts.artifactsDir);
+        if (opts.format === "jsonl") {
+          for (const item of list) process.stdout.write(JSON.stringify(item) + "\n");
+        } else {
+          if (list.length === 0) { console.log("No incubations found."); return; }
+          for (const item of list) console.log(`${item.id}  ${item.status}  ${item.updated_at}`);
+        }
+      }
+    }
+  );
+
+program
+  .command("artifacts")
+  .description("List artifacts for an incubation")
+  .argument("<id>", "Incubation ID")
+  .option("--artifacts-dir <path>", "Artifacts directory", ".aether/artifacts")
+  .option("--format <format>", "Output format: human|jsonl", "human")
+  .action(
+    (id: string, opts: { artifactsDir: string; format: "human" | "jsonl" }) => {
+      const res = listArtifacts({ artifactsDir: opts.artifactsDir, incubationId: id });
+      if (!res.ok) {
+        if (opts.format === "jsonl") {
+          process.stdout.write(JSON.stringify({ level: "error", error: res.error }) + "\n");
+        } else {
+          console.error(res.error);
+        }
+        process.exit(1);
+      }
+      if (opts.format === "jsonl") {
+        for (const f of res.files) process.stdout.write(JSON.stringify(f) + "\n");
+      } else {
+        for (const f of res.files) console.log(`${f.path}  ${f.size} bytes`);
+      }
+    }
+  );
+
+program
+  .command("baseline")
+  .description("View or update baseline")
+  .option("--artifacts-dir <path>", "Artifacts directory", ".aether/artifacts")
+  .option("--update", "Update baseline from latest results")
+  .option("--sha <sha>", "Main SHA for baseline update")
+  .option("--format <format>", "Output format: human|jsonl", "human")
+  .action(
+    (opts: { artifactsDir: string; update?: boolean; sha?: string; format: "human" | "jsonl" }) => {
+      if (opts.update) {
+        if (!opts.sha) {
+          console.error("--sha is required when using --update");
+          process.exit(EXIT.INVALID_ARGS);
+        }
+        const res = updateBaseline(opts.artifactsDir, opts.sha);
+        if (!res.ok) { console.error(res.error); process.exit(1); }
+        if (opts.format === "jsonl") {
+          process.stdout.write(JSON.stringify(res.baseline) + "\n");
+        } else {
+          console.log("Baseline updated.");
+        }
+      } else {
+        const res = readBaseline(opts.artifactsDir);
+        if (!res.ok) { console.error(res.error); process.exit(1); }
+        if (opts.format === "jsonl") {
+          process.stdout.write(JSON.stringify(res.baseline) + "\n");
+        } else {
+          console.log(JSON.stringify(res.baseline, null, 2));
+        }
+      }
+    }
+  );
+
+// --- OpenSpec task-mode commands ---
+
 const openspec = program.command("openspec").description("OpenSpec task-mode control plane");
 
 openspec
@@ -130,4 +271,8 @@ openspec
     await openspecStatus({ repoPath: opts.repo, changeId: opts.change });
   });
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  process.stderr.write(JSON.stringify({ ok: false, error: message }) + "\n");
+  process.exit(1);
+});

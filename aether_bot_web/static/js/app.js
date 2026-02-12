@@ -205,14 +205,14 @@
             // Load history for the active session
             if (currentSessionId) {
                 try {
-                    var msgRes = await fetch(API + '/api/sessions/' + encodeURIComponent(currentSessionId) + '/messages?limit=50', {
+                    var msgRes = await fetch(API + '/api/sessions/' + encodeURIComponent(currentSessionId) + '/messages', {
                         headers: { 'Authorization': 'Bearer ' + token }
                     });
                     if (msgRes.ok) {
                         var msgData = await msgRes.json();
                         var msgs = msgData.messages || [];
                         msgs.forEach(function (m) {
-                            var el = appendMessage(m.role, '');
+                            var el = appendMessage(m.role, '', false, m.timestamp);
                             var contentEl = el.querySelector('.msg-content');
                             contentEl.innerHTML = renderMarkdown(m.content);
                             if (m.media && m.media.length > 0) {
@@ -241,6 +241,8 @@
 
         eventSource.addEventListener('connected', (e) => {
             console.log('SSE connected', JSON.parse(e.data));
+            // Catch up any messages missed during disconnection
+            catchUpMessages();
         });
 
         eventSource.addEventListener('delta', (e) => {
@@ -269,7 +271,7 @@
                 return;
             }
             // Render user message from another device
-            appendMessage('user', data.content || '', true);
+            appendMessage('user', data.content || '', true, data.timestamp);
             scrollToBottom();
         });
 
@@ -292,10 +294,18 @@
         }
     });
 
+    // === Network recovery: reconnect SSE when back online ===
+    window.addEventListener('online', function () {
+        if (token) {
+            console.log('Network back online, reconnecting SSE...');
+            connectSSE();
+        }
+    });
+
     async function catchUpMessages() {
         if (!currentSessionId) return;
         try {
-            var res = await fetch(API + '/api/sessions/' + encodeURIComponent(currentSessionId) + '/messages?limit=50', {
+            var res = await fetch(API + '/api/sessions/' + encodeURIComponent(currentSessionId) + '/messages', {
                 headers: { 'Authorization': 'Bearer ' + token }
             });
             if (!res.ok) return;
@@ -307,13 +317,15 @@
             var existingEls = messagesEl.querySelectorAll('.message:not(.streaming)');
             var existingCount = existingEls.length;
 
-            // If server has more messages, the simple diff might be wrong
-            // (e.g. messages from another device). Do a full reload.
-            if (serverMsgs.length !== existingCount) {
+            // Only reload when server has MORE messages than DOM (we missed
+            // messages while disconnected).  When DOM has more than server it
+            // means the user just sent a message that the agent hasn't
+            // persisted yet — don't wipe those pending messages.
+            if (serverMsgs.length > existingCount) {
                 // Remove all non-streaming messages and re-render from server
                 Array.from(existingEls).forEach(function (el) { el.remove(); });
                 serverMsgs.forEach(function (m) {
-                    var el = appendMessage(m.role, '');
+                    var el = appendMessage(m.role, '', false, m.timestamp);
                     var contentEl = el.querySelector('.msg-content');
                     contentEl.innerHTML = renderMarkdown(m.content);
                     // Re-render media attachments if present
@@ -338,7 +350,7 @@
         const sid = data.stream_id || 'default_stream';
         if (!streams[sid]) {
             // Create a new streaming bubble
-            const el = appendMessage('assistant', '');
+            const el = appendMessage('assistant', '', false, data.timestamp);
             el.classList.add('streaming');
             streams[sid] = { el: el, content: '' };
         }
@@ -369,10 +381,12 @@
             delete streams[sid];
         } else {
             // Full message (no prior stream)
-            msgEl = appendMessage(data.role || 'assistant', '');
+            msgEl = appendMessage(data.role || 'assistant', '', false, data.timestamp);
             const contentEl = msgEl.querySelector('.msg-content') || msgEl;
             contentEl.innerHTML = renderMarkdown(data.content);
         }
+
+        updateMessageTime(msgEl, data.timestamp);
 
         // Render media attachments (bot -> user)
         if (data.media && data.media.length > 0) {
@@ -413,7 +427,7 @@
                 container.appendChild(a);
             }
         });
-        getMessageBody(msgEl).appendChild(container);
+        appendToMessageBody(msgEl, container);
     }
 
     // === Context status bar (fixed position, updates on each message) ===
@@ -529,7 +543,7 @@
         var mediaPaths = pendingAttachments.map(function (a) { return a.path; }).filter(Boolean);
 
         // Show user message immediately (with attachment thumbnails)
-        var userEl = appendMessage('user', content || '', true);
+        var userEl = appendMessage('user', content || '', true, Date.now());
         if (pendingAttachments.length > 0) {
             renderUserAttachments(userEl, pendingAttachments);
         }
@@ -539,38 +553,69 @@
         pendingAttachments = [];
         updateAttachmentPreview();
 
-        try {
-            var body = {
-                content: content,
-                session_id: currentSessionId,
-                message_id: messageId
-            };
-            if (mediaPaths.length > 0) {
-                body.media = mediaPaths;
-            }
+        var body = {
+            content: content,
+            session_id: currentSessionId,
+            message_id: messageId
+        };
+        if (mediaPaths.length > 0) {
+            body.media = mediaPaths;
+        }
 
-            const res = await fetch(API + '/api/messages', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + token
-                },
-                body: JSON.stringify(body)
-            });
+        var maxRetries = 3;
+        var attempt = 0;
+        var sent = false;
 
-            if (res.status === 401) {
-                clearAuth();
-                showLogin();
-                return;
-            }
+        while (attempt < maxRetries && !sent) {
+            try {
+                const res = await fetch(API + '/api/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify(body)
+                });
 
-            if (res.status === 429) {
-                appendMessage('assistant', 'Rate limited. Please wait a moment.');
+                if (res.status === 401) {
+                    clearAuth();
+                    showLogin();
+                    return;
+                }
+
+                if (res.status === 429) {
+                    // Rate limited — wait and retry
+                    attempt++;
+                    if (attempt < maxRetries) {
+                        await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
+                        continue;
+                    }
+                    appendMessage('assistant', 'Rate limited. Please wait a moment.', false, Date.now());
+                    scrollToBottom();
+                    break;
+                }
+
+                if (res.ok) {
+                    sent = true;
+                } else {
+                    // Server error — retry
+                    attempt++;
+                    if (attempt < maxRetries) {
+                        await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
+                        continue;
+                    }
+                    appendMessage('assistant', 'Failed to send message (server error). Please try again.', false, Date.now());
+                    scrollToBottom();
+                }
+            } catch (err) {
+                attempt++;
+                if (attempt < maxRetries) {
+                    await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
+                    continue;
+                }
+                appendMessage('assistant', 'Failed to send message. Check your connection.', false, Date.now());
                 scrollToBottom();
             }
-        } catch (err) {
-            appendMessage('assistant', 'Failed to send message. Check your connection.');
-            scrollToBottom();
         }
 
         sendBtn.disabled = false;
@@ -594,14 +639,55 @@
                 container.appendChild(span);
             }
         });
-        getMessageBody(msgEl).appendChild(container);
+        appendToMessageBody(msgEl, container);
     }
 
     function getMessageBody(msgEl) {
         return msgEl.querySelector('.msg-body') || msgEl;
     }
 
-    function appendMessage(role, content, isPlainText) {
+    function appendToMessageBody(msgEl, node) {
+        var body = getMessageBody(msgEl);
+        var timeEl = body.querySelector('.msg-time');
+        if (timeEl) {
+            body.insertBefore(node, timeEl);
+        } else {
+            body.appendChild(node);
+        }
+    }
+
+    function formatMessageTime(timestamp) {
+        var date = null;
+        if (timestamp instanceof Date) {
+            date = timestamp;
+        } else if (typeof timestamp === 'number') {
+            date = new Date(timestamp);
+        } else if (typeof timestamp === 'string' && timestamp) {
+            date = new Date(timestamp);
+        }
+        if (!date || isNaN(date.getTime())) {
+            date = new Date();
+        }
+        var now = new Date();
+        var sameDay = date.toDateString() === now.toDateString();
+        var options = sameDay
+            ? { hour: '2-digit', minute: '2-digit' }
+            : { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
+        return date.toLocaleString(undefined, options);
+    }
+
+    function updateMessageTime(msgEl, timestamp) {
+        var body = getMessageBody(msgEl);
+        var timeEl = body.querySelector('.msg-time');
+        if (!timeEl) {
+            timeEl = document.createElement('div');
+            timeEl.className = 'msg-time';
+            body.appendChild(timeEl);
+        }
+        timeEl.textContent = formatMessageTime(timestamp);
+    }
+
+    function appendMessage(role, content, isPlainText, timestamp) {
         const safeRole = role === 'user' ? 'user' : 'assistant';
         const assistantName = getAssistantName();
         const userName = getUserName();
@@ -647,6 +733,7 @@
 
         body.appendChild(name);
         body.appendChild(contentDiv);
+        updateMessageTime(body, timestamp);
         div.appendChild(avatar);
         div.appendChild(body);
 
@@ -755,15 +842,24 @@
             if (!res.ok) return;
             const data = await res.json();
             var sessions = data.sessions || [];
+            var defaultTitle = getBrandProductName();
 
-            // Sync currentSessionId with backend's active marker
+            // Sync currentSessionId with backend's active marker and update title
             if (sessions.length > 0) {
                 var active = sessions.find(function (s) { return s.active; });
                 if (active) {
                     currentSessionId = active.session_id;
+                    chatTitle.textContent = active.title || defaultTitle;
                 } else if (!currentSessionId) {
                     // No active marker, use first (most recent)
                     currentSessionId = sessions[0].session_id;
+                    chatTitle.textContent = sessions[0].title || defaultTitle;
+                } else {
+                    // currentSessionId already set — sync title from session list
+                    var current = sessions.find(function (s) { return s.session_id === currentSessionId; });
+                    if (current) {
+                        chatTitle.textContent = current.title || defaultTitle;
+                    }
                 }
             }
 
@@ -777,8 +873,26 @@
             var li = document.createElement('li');
 
             var icon = document.createElement('span');
-            icon.className = 'session-icon material-symbols-outlined';
-            icon.textContent = 'chat_bubble';
+            icon.className = 'session-icon';
+
+            var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.setAttribute('focusable', 'false');
+
+            var bubble = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            bubble.setAttribute('d', 'M7 6.5h10a3 3 0 0 1 3 3V14a3 3 0 0 1-3 3H11l-4 3v-3H7a3 3 0 0 1-3-3V9.5a3 3 0 0 1 3-3z');
+            bubble.setAttribute('stroke-linejoin', 'round');
+
+            var sparkle = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            sparkle.setAttribute('d', 'M15.5 9.3l.6 1.2 1.2.6-1.2.6-.6 1.2-.6-1.2-1.2-.6 1.2-.6z');
+            sparkle.setAttribute('class', 'sparkle');
+            sparkle.setAttribute('stroke-linecap', 'round');
+            sparkle.setAttribute('stroke-linejoin', 'round');
+
+            svg.appendChild(bubble);
+            svg.appendChild(sparkle);
+            icon.appendChild(svg);
             li.appendChild(icon);
 
             var info = document.createElement('div');
@@ -839,14 +953,14 @@
 
         // Load history messages
         try {
-            var res = await fetch(API + '/api/sessions/' + encodeURIComponent(sessionId) + '/messages?limit=50', {
+            var res = await fetch(API + '/api/sessions/' + encodeURIComponent(sessionId) + '/messages', {
                 headers: { 'Authorization': 'Bearer ' + token }
             });
             if (res.ok) {
                 var data = await res.json();
                 var msgs = data.messages || [];
                 msgs.forEach(function (m) {
-                    var el = appendMessage(m.role, '');
+                    var el = appendMessage(m.role, '', false, m.timestamp);
                     var contentEl = el.querySelector('.msg-content');
                     contentEl.innerHTML = renderMarkdown(m.content);
                     if (m.media && m.media.length > 0) {
@@ -878,7 +992,7 @@
                 contextBar.classList.add('hidden');
                 // Show the greeting from the HTTP response (not SSE)
                 if (data.session.greeting) {
-                    var el = appendMessage('assistant', '');
+                    var el = appendMessage('assistant', '', false, Date.now());
                     var contentEl = el.querySelector('.msg-content') || el;
                     contentEl.innerHTML = renderMarkdown(data.session.greeting);
                     scrollToBottom();
