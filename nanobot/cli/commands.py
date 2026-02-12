@@ -26,6 +26,7 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+NEW_SESSION_COMMANDS = {"/new", "/reset"}
 
 # ---------------------------------------------------------------------------
 # Lightweight CLI input: readline for arrow keys / history, termios for flush
@@ -157,6 +158,11 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
 def _is_exit_command(command: str) -> bool:
     """Return True when input should end interactive chat."""
     return command.lower() in EXIT_COMMANDS
+
+
+def _is_new_session_command(command: str) -> bool:
+    """Return True when input should clear the session history."""
+    return command.lower() in NEW_SESSION_COMMANDS
 
 
 async def _read_interactive_input_async() -> str:
@@ -681,6 +687,15 @@ def agent(
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
+
+                    if _is_new_session_command(command):
+                        session = agent_loop.sessions.get_or_create(session_id)
+                        session.clear()
+                        agent_loop.sessions.save(session)
+                        console.print(
+                            f"\n[green]{__logo__} Started new session. History cleared.[/green]\n"
+                        )
+                        continue
 
                     with _thinking_ctx():
                         response = await agent_loop.process_direct(user_input, session_id, return_message=show_context)
