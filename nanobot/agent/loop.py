@@ -23,7 +23,6 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.context_manager import ContextManager
-from nanobot.agent.hooks import HookAction, HookContext, HookManager, HookPoint
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.claude import ClaudeTool
 from nanobot.agent.tools.cron import CronTool
@@ -151,9 +150,7 @@ class AgentLoop:
         )
 
         self._running = False
-        self.hooks = HookManager()
         self._register_default_tools()
-        self._register_default_hooks()
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -189,17 +186,6 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-
-    def _register_default_hooks(self) -> None:
-        """Register the default set of hooks."""
-        from nanobot.agent.taskmode.hook import TaskModeHook
-
-        self.hooks.register(TaskModeHook(
-            workspace=self.workspace,
-            provider=self.provider,
-            model=self.model,
-            auto_detect=False,  # Phase 1: explicit /task only; enable later
-        ))
 
     def _should_stream(self, channel: str) -> bool:
         if not self.stream:
@@ -292,21 +278,6 @@ class AgentLoop:
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
 
-        # === PRE_PROCESS hooks ===
-        hook_ctx = HookContext(msg=msg, session=session)
-        pre_result = await self.hooks.run(HookPoint.PRE_PROCESS, hook_ctx)
-        if pre_result.action == HookAction.RESPOND:
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=pre_result.response or "",
-                metadata=dict(msg.metadata) if msg.metadata else {},
-            )
-        if pre_result.action == HookAction.SKIP:
-            return None
-        if pre_result.context is not None:
-            hook_ctx = pre_result.context
-
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
@@ -333,29 +304,6 @@ class AgentLoop:
         session_state = ctx_bundle.session_state
         ctx_stats = ctx_bundle.stats
         ctx_time = time.monotonic() - t_ctx
-
-        # === PRE_LLM hooks ===
-        hook_ctx.messages = messages
-        pre_llm_result = await self.hooks.run(HookPoint.PRE_LLM, hook_ctx)
-        if pre_llm_result.action == HookAction.RESPOND:
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=pre_llm_result.response or "",
-                metadata=dict(msg.metadata) if msg.metadata else {},
-            )
-        if pre_llm_result.context is not None:
-            hook_ctx = pre_llm_result.context
-            if hook_ctx.messages is not None:
-                messages = hook_ctx.messages
-
-        # Inject hook-provided extra context into the system prompt
-        task_context = hook_ctx.extra.get("task_context")
-        if task_context and messages:
-            for m in messages:
-                if m.get("role") == "system" and isinstance(m.get("content"), str):
-                    m["content"] += f"\n\n---\n\n{task_context}"
-                    break
 
         # Agent loop
         iteration = 0
@@ -518,14 +466,6 @@ class AgentLoop:
             if summary_response.response_id and summary_response.response_id.startswith("resp_"):
                 last_response = summary_response
 
-        # === POST_LLM hooks ===
-        hook_ctx.response_content = final_content
-        post_llm_result = await self.hooks.run(HookPoint.POST_LLM, hook_ctx)
-        if post_llm_result.context is not None:
-            hook_ctx = post_llm_result.context
-            if hook_ctx.response_content is not None:
-                final_content = hook_ctx.response_content
-
         # Update session with LLM context info
         if last_response is not None:
             self.context_manager.update_after_response(session, last_response)
@@ -614,12 +554,6 @@ class AgentLoop:
             content=final_content,
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
-
-        # === POST_PROCESS hooks ===
-        hook_ctx.outbound = outbound
-        post_result = await self.hooks.run(HookPoint.POST_PROCESS, hook_ctx)
-        if post_result.context is not None and post_result.context.outbound is not None:
-            outbound = post_result.context.outbound
 
         return outbound
 

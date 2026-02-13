@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,10 @@ class ExecTool(Tool):
         self.timeout = timeout
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
-            r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
             r"\brmdir\s+/s\b",               # rmdir /s
-            r"\b(format|mkfs|diskpart)\b",   # disk operations
+            r"\b(mkfs|diskpart)\b",          # disk operations
+            r"(?:^|[;&|]\s*)format\s+[a-z]:",  # windows format command
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
@@ -113,6 +114,10 @@ class ExecTool(Tool):
         cmd = command.strip()
         lower = cmd.lower()
 
+        rm_error = self._guard_recursive_rm(cmd, cwd)
+        if rm_error:
+            return rm_error
+
         for pattern in self.deny_patterns:
             if re.search(pattern, lower):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
@@ -141,4 +146,86 @@ class ExecTool(Tool):
                 if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
+        return None
+
+    def _guard_recursive_rm(self, command: str, cwd: str) -> str | None:
+        """Allow recursive rm only for paths strictly inside cwd."""
+        cwd_path = Path(cwd).resolve()
+        for segment in re.split(r"(?:\|\||&&|[;|])", command):
+            segment = segment.strip()
+            if not segment:
+                continue
+
+            try:
+                tokens = shlex.split(segment, posix=True)
+            except ValueError:
+                continue
+            if not tokens:
+                continue
+
+            cmd_index = self._find_rm_index(tokens)
+            if cmd_index is None:
+                continue
+
+            has_recursive = False
+            targets: list[str] = []
+            parse_as_targets = False
+            for token in tokens[cmd_index + 1:]:
+                if not parse_as_targets and token == "--":
+                    parse_as_targets = True
+                    continue
+                if not parse_as_targets and token.startswith("-") and token != "-":
+                    if "r" in token:
+                        has_recursive = True
+                    continue
+                targets.append(token)
+
+            if not has_recursive:
+                continue
+            if not targets:
+                return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+            for target in targets:
+                if target in {"/", "~", ".", ".."}:
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
+                if any(ch in target for ch in "*?[]"):
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+                path = Path(target).expanduser()
+                if not path.is_absolute():
+                    path = cwd_path / path
+                try:
+                    resolved = path.resolve()
+                except Exception:
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+                if resolved == cwd_path or cwd_path not in resolved.parents:
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+        return None
+
+    @staticmethod
+    def _find_rm_index(tokens: list[str]) -> int | None:
+        if not tokens:
+            return None
+
+        if Path(tokens[0]).name == "rm":
+            return 0
+
+        if Path(tokens[0]).name != "sudo":
+            return None
+
+        i = 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "--":
+                i += 1
+                break
+            if not token.startswith("-"):
+                break
+            i += 1
+            if token in {"-u", "-g", "-h", "-p", "-r", "-t", "-C", "-T"} and i < len(tokens):
+                i += 1
+        if i < len(tokens) and Path(tokens[i]).name == "rm":
+            return i
         return None
