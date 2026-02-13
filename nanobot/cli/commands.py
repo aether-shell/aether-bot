@@ -210,20 +210,30 @@ def onboard():
 
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        if not typer.confirm("Overwrite?"):
-            raise typer.Exit()
-
-    # Create default config
-    config = Config()
-    save_config(config)
-    console.print(f"[green]✓[/green] Created config at {config_path}")
-
+        if typer.confirm("Overwrite?"):
+            # Create default config
+            config = Config()
+            save_config(config)
+            console.print(f"[green]✓[/green] Created config at {config_path}")
+    else:
+        # Create default config
+        config = Config()
+        save_config(config)
+        console.print(f"[green]✓[/green] Created config at {config_path}")
+    
+>>>>>>> f016025 (add feature to onboarding that will ask to generate missing workspace files)
     # Create workspace
     workspace = get_workspace_path()
     console.print(f"[green]✓[/green] Created workspace at {workspace}")
+    create_templates = True
+    if any(workspace.iterdir()):
+        console.print(f"[yellow]Workspace already exists at {workspace}[/yellow]")
+        if not typer.confirm("Create missing default templates? (will not overwrite existing files)"):
+            create_templates = False
 
     # Create default bootstrap files
-    _create_workspace_templates(workspace)
+    if create_templates:
+        _create_workspace_templates(workspace)
 
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
