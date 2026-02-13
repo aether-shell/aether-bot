@@ -447,6 +447,16 @@ class AgentLoop:
                 metadata=out_meta,
             )
 
+        if self._is_help_command(msg.content):
+            out_meta = dict(msg.metadata or {})
+            out_meta.setdefault("trace_id", trace_id)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands",
+                metadata=out_meta,
+            )
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Trace {trace_id} processing message from {msg.channel}:{msg.sender_id}: {preview}")
 
@@ -937,6 +947,17 @@ class AgentLoop:
         if "@" in first:
             first = first.split("@", 1)[0]
         return first == "/new"
+
+    @staticmethod
+    def _is_help_command(content: str) -> bool:
+        if not content:
+            return False
+        first = content.strip().split()[0]
+        if not first:
+            return False
+        if "@" in first:
+            first = first.split("@", 1)[0]
+        return first == "/help"
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """

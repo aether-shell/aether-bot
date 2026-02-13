@@ -94,6 +94,7 @@ class TelegramChannel(BaseChannel):
     # Commands registered with Telegram's command menu
     BOT_COMMANDS = [
         BotCommand("start", "Start the bot"),
+        BotCommand("new", "Start a new conversation"),
         BotCommand("reset", "Reset conversation history"),
         BotCommand("help", "Show available commands"),
     ]
@@ -129,6 +130,7 @@ class TelegramChannel(BaseChannel):
 
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
+        self._app.add_handler(CommandHandler("new", self._on_reset))
         self._app.add_handler(CommandHandler("reset", self._on_reset))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
@@ -227,7 +229,7 @@ class TelegramChannel(BaseChannel):
         )
 
     async def _on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /reset command — clear conversation history."""
+        """Handle /new or /reset command — clear conversation history."""
         if not update.message or not update.effective_user:
             return
 
@@ -255,6 +257,7 @@ class TelegramChannel(BaseChannel):
         help_text = (
             "🐈 <b>nanobot commands</b>\n\n"
             "/start — Start the bot\n"
+            "/new — Start a new conversation\n"
             "/reset — Reset conversation history\n"
             "/help — Show this help message\n\n"
             "Just send me a text message to chat!"
