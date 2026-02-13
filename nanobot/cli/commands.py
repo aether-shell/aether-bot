@@ -223,16 +223,13 @@ def onboard():
 
     # Create workspace
     workspace = get_workspace_path()
-    console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    create_templates = True
-    if any(workspace.iterdir()):
-        console.print(f"[yellow]Workspace already exists at {workspace}[/yellow]")
-        if not typer.confirm("Create missing default templates? (will not overwrite existing files)"):
-            create_templates = False
-
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]✓[/green] Created workspace at {workspace}")
+    else:
+        console.print(f"[green]✓[/green] Workspace ready at {workspace}")
     # Create default bootstrap files
-    if create_templates:
-        _create_workspace_templates(workspace)
+    _create_workspace_templates(workspace)
 
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
