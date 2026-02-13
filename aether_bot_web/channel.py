@@ -76,6 +76,7 @@ class HTTPChannel(BaseChannel):
         self._app.router.add_post("/api/auth/login", self._handle_login)
         self._app.router.add_get("/api/auth/check", self._handle_auth_check)
         self._app.router.add_post("/api/messages", self._handle_send_message)
+        self._app.router.add_post("/api/messages/ack", self._handle_ack)
         self._app.router.add_get("/api/messages/stream", self._handle_sse)
         self._app.router.add_get("/api/sessions", self._handle_list_sessions)
         self._app.router.add_get("/api/sessions/{session_id}/messages", self._handle_session_messages)
@@ -350,6 +351,36 @@ class HTTPChannel(BaseChannel):
             except asyncio.QueueFull:
                 pass
 
+        return web.json_response({"status": "ok"})
+
+    async def _handle_ack(self, request: web.Request) -> web.Response:
+        payload = self._extract_auth(request)
+        if payload is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        chat_id = payload["chat_id"]
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        event_id = body.get("event_id")
+        session_id = (body.get("session_id") or "")
+        stream_id = (body.get("stream_id") or "")
+
+        try:
+            event_id_int = int(event_id)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid event_id"}, status=400)
+        if event_id_int <= 0:
+            return web.json_response({"error": "invalid event_id"}, status=400)
+
+        # TODO: persist or consume ACK for server-side redelivery / read-receipts
+        logger.debug(
+            f"Web delivered ack: chat_id={chat_id} session_id={session_id or 'n/a'} "
+            f"event_id={event_id_int} stream_id={stream_id or 'n/a'}"
+        )
         return web.json_response({"status": "ok"})
 
     # ---- SSE ----

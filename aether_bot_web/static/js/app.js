@@ -9,10 +9,17 @@
     let eventSource = null;
     // Streaming state: streamId -> { el, content }
     const streams = {};
+    // Delivery ACK tracking: avoid ACK storms on reconnect/replay
+    const ackedEventIds = new Set();
     // Pending file uploads: [{file, path, file_id, filename, content_type}]
     let pendingAttachments = [];
     // Track message_ids sent from this client to deduplicate user_message SSE events
     const sentMessageIds = new Set();
+    // Guard: prevent catchUpMessages from running concurrently or during SSE message processing
+    let catchUpRunning = false;
+    let catchUpScheduled = false;
+    // Flag: set while loadSessionsAndHistory is running to suppress catch-up
+    let initialLoadInProgress = false;
 
     // === DOM ===
     const loginView = document.getElementById('login-view');
@@ -122,6 +129,8 @@
     function clearAuth() {
         token = '';
         chatId = '';
+        lastEventId = '';
+        ackedEventIds.clear();
         localStorage.removeItem('nanobot_token');
         localStorage.removeItem('nanobot_chat_id');
     }
@@ -179,6 +188,7 @@
 
     // Load sessions, find active one, then load its history
     async function loadSessionsAndHistory() {
+        initialLoadInProgress = true;
         try {
             const res = await fetch(API + '/api/sessions', {
                 headers: { 'Authorization': 'Bearer ' + token }
@@ -212,7 +222,7 @@
                         var msgData = await msgRes.json();
                         var msgs = msgData.messages || [];
                         msgs.forEach(function (m) {
-                            var el = appendMessage(m.role, '', false, m.timestamp);
+                            var el = appendMessage(m.role, '', false, m.timestamp, { history: true });
                             var contentEl = el.querySelector('.msg-content');
                             contentEl.innerHTML = renderMarkdown(m.content);
                             if (m.media && m.media.length > 0) {
@@ -224,6 +234,7 @@
                 } catch (e) { /* ignore */ }
             }
         } catch (e) { /* ignore */ }
+        finally { initialLoadInProgress = false; }
     }
 
     // === SSE ===
@@ -233,6 +244,9 @@
     function connectSSE() {
         if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
         if (eventSource) { eventSource.close(); eventSource = null; }
+        if (!lastEventId) {
+            ackedEventIds.clear();
+        }
         var url = API + '/api/messages/stream?token=' + encodeURIComponent(token);
         if (lastEventId) {
             url += '&lastEventId=' + encodeURIComponent(lastEventId);
@@ -241,8 +255,9 @@
 
         eventSource.addEventListener('connected', (e) => {
             console.log('SSE connected', JSON.parse(e.data));
-            // Catch up any messages missed during disconnection
-            catchUpMessages();
+            // Delay catch-up slightly so any replayed SSE events (via
+            // Last-Event-ID) are processed first, avoiding count mismatch.
+            setTimeout(function () { catchUpMessages(); }, 500);
         });
 
         eventSource.addEventListener('delta', (e) => {
@@ -252,9 +267,10 @@
         });
 
         eventSource.addEventListener('message', (e) => {
+            var prevEventId = lastEventId;
             if (e.lastEventId) lastEventId = e.lastEventId;
             const data = JSON.parse(e.data);
-            handleMessage(data);
+            handleMessage(data, lastEventId, prevEventId);
         });
 
         eventSource.addEventListener('user_message', (e) => {
@@ -271,7 +287,8 @@
                 return;
             }
             // Render user message from another device
-            appendMessage('user', data.content || '', true, data.timestamp);
+            var crossEl = appendMessage('user', data.content || '', true, data.timestamp);
+            setDelivered(crossEl);
             scrollToBottom();
         });
 
@@ -289,8 +306,9 @@
             if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
                 connectSSE();
             }
-            // Catch up any messages we missed while the tab was hidden
-            catchUpMessages();
+            // Catch up any messages we missed while the tab was hidden.
+            // Delay slightly so replayed SSE events arrive first.
+            setTimeout(function () { catchUpMessages(); }, 600);
         }
     });
 
@@ -304,6 +322,14 @@
 
     async function catchUpMessages() {
         if (!currentSessionId) return;
+        // Skip if initial history load is in progress
+        if (initialLoadInProgress) return;
+        if (catchUpRunning) {
+            catchUpScheduled = true;
+            return;
+        }
+        catchUpRunning = true;
+        catchUpScheduled = false;
         try {
             var res = await fetch(API + '/api/sessions/' + encodeURIComponent(currentSessionId) + '/messages', {
                 headers: { 'Authorization': 'Bearer ' + token }
@@ -325,7 +351,7 @@
                 // Remove all non-streaming messages and re-render from server
                 Array.from(existingEls).forEach(function (el) { el.remove(); });
                 serverMsgs.forEach(function (m) {
-                    var el = appendMessage(m.role, '', false, m.timestamp);
+                    var el = appendMessage(m.role, '', false, m.timestamp, { history: true });
                     var contentEl = el.querySelector('.msg-content');
                     contentEl.innerHTML = renderMarkdown(m.content);
                     // Re-render media attachments if present
@@ -337,6 +363,12 @@
             }
         } catch (e) {
             console.warn('catchUpMessages error:', e);
+        } finally {
+            catchUpRunning = false;
+            if (catchUpScheduled) {
+                catchUpScheduled = false;
+                catchUpMessages();
+            }
         }
     }
 
@@ -360,7 +392,7 @@
         scrollToBottom();
     }
 
-    function handleMessage(data) {
+    function handleMessage(data, eventId, prevEventId) {
         // Verify session_id matches current session
         if (data.session_id && currentSessionId && data.session_id !== currentSessionId) {
             console.debug('Ignoring message for different session:', data.session_id);
@@ -387,6 +419,9 @@
         }
 
         updateMessageTime(msgEl, data.timestamp);
+
+        // Send ACK to server (fire-and-forget, no UI badge on bot messages)
+        tryAckDelivered(data, msgEl, eventId, prevEventId);
 
         // Render media attachments (bot -> user)
         if (data.media && data.media.length > 0) {
@@ -544,6 +579,7 @@
 
         // Show user message immediately (with attachment thumbnails)
         var userEl = appendMessage('user', content || '', true, Date.now());
+        setSending(userEl);
         if (pendingAttachments.length > 0) {
             renderUserAttachments(userEl, pendingAttachments);
         }
@@ -590,6 +626,7 @@
                         await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
                         continue;
                     }
+                    setSendFailed(userEl);
                     appendMessage('assistant', 'Rate limited. Please wait a moment.', false, Date.now());
                     scrollToBottom();
                     break;
@@ -597,6 +634,7 @@
 
                 if (res.ok) {
                     sent = true;
+                    setDelivered(userEl);
                 } else {
                     // Server error — retry
                     attempt++;
@@ -604,6 +642,7 @@
                         await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
                         continue;
                     }
+                    setSendFailed(userEl);
                     appendMessage('assistant', 'Failed to send message (server error). Please try again.', false, Date.now());
                     scrollToBottom();
                 }
@@ -613,6 +652,7 @@
                     await new Promise(function (r) { setTimeout(r, 1000 * Math.pow(2, attempt)); });
                     continue;
                 }
+                setSendFailed(userEl);
                 appendMessage('assistant', 'Failed to send message. Check your connection.', false, Date.now());
                 scrollToBottom();
             }
@@ -687,7 +727,90 @@
         timeEl.textContent = formatMessageTime(timestamp);
     }
 
-    function appendMessage(role, content, isPlainText, timestamp) {
+    function ensureDeliveryBadge(msgEl) {
+        if (!msgEl) return null;
+        // Only user messages show delivery status
+        if (!msgEl.classList.contains('user')) return null;
+        var body = getMessageBody(msgEl);
+        var timeEl = body.querySelector('.msg-time');
+        if (!timeEl) return null;
+
+        var badge = timeEl.querySelector('.msg-delivery');
+        if (badge) return badge;
+
+        badge = document.createElement('span');
+        badge.className = 'msg-delivery';
+        badge.setAttribute('aria-label', '');
+        timeEl.appendChild(badge);
+        return badge;
+    }
+
+    function setDelivered(msgEl) {
+        var badge = ensureDeliveryBadge(msgEl);
+        if (!badge) return;
+        badge.classList.remove('sending', 'send-failed');
+        badge.classList.add('delivered');
+        badge.textContent = '\u2713';
+        badge.setAttribute('aria-label', 'delivered');
+    }
+
+    function setSending(msgEl) {
+        var badge = ensureDeliveryBadge(msgEl);
+        if (!badge) return;
+        badge.classList.add('sending');
+        badge.textContent = '\u2022\u2022\u2022';
+    }
+
+    function setSendFailed(msgEl) {
+        var badge = ensureDeliveryBadge(msgEl);
+        if (!badge) return;
+        badge.classList.remove('sending');
+        badge.classList.add('send-failed');
+        badge.textContent = '!';
+        badge.setAttribute('aria-label', 'send failed');
+    }
+
+
+    async function tryAckDelivered(data, msgEl, eventId, prevEventId) {
+        // Optimistic: mark delivered immediately (client received the message)
+        setDelivered(msgEl);
+
+        if (!eventSource) return;
+        if (!eventId) return;
+        if (!data || data.type !== 'message') return;
+        if ((data.role || 'assistant') !== 'assistant') return;
+
+        var eid = eventId;
+        var currentId = parseInt(eid, 10);
+        var previousId = parseInt(prevEventId || '', 10);
+        if (!Number.isNaN(currentId) && !Number.isNaN(previousId) && currentId < previousId) {
+            // Server likely restarted/reset event_id — clear dedupe set.
+            ackedEventIds.clear();
+        }
+        if (ackedEventIds.has(eid)) return;
+        ackedEventIds.add(eid);
+        // Evict oldest entry when Set exceeds limit.
+        if (ackedEventIds.size > 2000) {
+            var first = ackedEventIds.values().next().value;
+            ackedEventIds.delete(first);
+        }
+
+        // Fire-and-forget ACK POST
+        fetch(API + '/api/messages/ack', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + token
+            },
+            body: JSON.stringify({
+                event_id: eid,
+                session_id: data.session_id || currentSessionId || '',
+                stream_id: data.stream_id || ''
+            })
+        }).catch(function () { /* ignore */ });
+    }
+
+    function appendMessage(role, content, isPlainText, timestamp, opts) {
         const safeRole = role === 'user' ? 'user' : 'assistant';
         const assistantName = getAssistantName();
         const userName = getUserName();
@@ -738,6 +861,10 @@
         div.appendChild(body);
 
         messagesEl.appendChild(div);
+        // Auto-mark user messages as delivered when loading history
+        if (opts && opts.history && safeRole === 'user') {
+            setDelivered(div);
+        }
         return div;
     }
 
@@ -960,7 +1087,7 @@
                 var data = await res.json();
                 var msgs = data.messages || [];
                 msgs.forEach(function (m) {
-                    var el = appendMessage(m.role, '', false, m.timestamp);
+                    var el = appendMessage(m.role, '', false, m.timestamp, { history: true });
                     var contentEl = el.querySelector('.msg-content');
                     contentEl.innerHTML = renderMarkdown(m.content);
                     if (m.media && m.media.length > 0) {
