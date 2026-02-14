@@ -97,6 +97,7 @@ class SubagentManager:
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
+        t_start = asyncio.get_running_loop().time()
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -128,10 +129,15 @@ class SubagentManager:
             while iteration < max_iterations:
                 iteration += 1
 
+                t_llm = asyncio.get_running_loop().time()
                 response = await self.provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self.model,
+                )
+                logger.debug(
+                    f"Subagent [{task_id}] iteration={iteration} llm finish={response.finish_reason} "
+                    f"tool_calls={len(response.tool_calls)} elapsed={(asyncio.get_running_loop().time() - t_llm):.3f}s"
                 )
 
                 if response.has_tool_calls:
@@ -157,7 +163,12 @@ class SubagentManager:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
+                        t_tool = asyncio.get_running_loop().time()
                         result = await tools.execute(tool_call.name, tool_call.arguments)
+                        logger.debug(
+                            f"Subagent [{task_id}] tool={tool_call.name} "
+                            f"elapsed={(asyncio.get_running_loop().time() - t_tool):.3f}s result_chars={len(result)}"
+                        )
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -171,12 +182,17 @@ class SubagentManager:
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
 
-            logger.info(f"Subagent [{task_id}] completed successfully")
+            logger.info(
+                f"Subagent [{task_id}] completed successfully "
+                f"elapsed={(asyncio.get_running_loop().time() - t_start):.3f}s"
+            )
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
-            logger.error(f"Subagent [{task_id}] failed: {e}")
+            logger.error(
+                f"Subagent [{task_id}] failed elapsed={(asyncio.get_running_loop().time() - t_start):.3f}s: {e}"
+            )
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
     async def _announce_result(

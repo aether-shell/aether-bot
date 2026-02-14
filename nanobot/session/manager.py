@@ -1,6 +1,7 @@
 """Session management for conversation history."""
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,13 @@ from typing import Any
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, get_sessions_path, safe_filename
+
+
+def _preview(value: Any, max_chars: int = 120) -> str:
+    text = str(value or "").replace("\n", "\\n")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...(truncated)"
 
 
 @dataclass
@@ -72,9 +80,17 @@ class SessionManager:
         self._active_sessions: dict[str, str] = {}
         self._load_active_index()
         self._cache: dict[str, Session] = {}
+        logger.debug(
+            f"SessionManager init workspace={workspace} "
+            f"sessions_dir={self.sessions_dir} active_index={self._active_index_path}"
+        )
 
     def _load_active_index(self) -> None:
         if not self._active_index_path.exists():
+            logger.debug(
+                f"Session active index missing path={self._active_index_path}, "
+                "will initialize lazily"
+            )
             return
         try:
             with open(self._active_index_path) as f:
@@ -88,6 +104,10 @@ class SessionManager:
                     nv = self._active_sessions.get(k)
                     if ov != nv and ov is not None:
                         logger.debug(f"active_index changed: {k}: {ov} -> {nv}")
+                logger.debug(
+                    f"Session active index loaded entries={len(self._active_sessions)} "
+                    f"path={self._active_index_path}"
+                )
         except Exception as e:
             logger.warning(f"Failed to load session index: {e}")
 
@@ -109,7 +129,10 @@ class SessionManager:
         old = self._active_sessions.get(base_key)
         self._active_sessions[base_key] = session_key
         if old != session_key:
-            logger.debug(f"_set_active_key: {base_key}: {old} -> {session_key}")
+            logger.debug(
+                f"_set_active_key: {base_key}: {old} -> {session_key} "
+                f"active_entries={len(self._active_sessions)}"
+            )
         self._save_active_index()
 
     def _get_session_path(self, key: str) -> Path:
@@ -135,19 +158,32 @@ class SessionManager:
             The session.
         """
         # Direct session key (contains #timestamp) — resolve without active index
+        t_start = time.monotonic()
         if "#" in key:
+            path = self._get_session_path(key)
+            logger.debug(
+                f"get_or_create direct resolve key={key} path={path} "
+                f"cache_hit={key in self._cache}"
+            )
             if key in self._cache:
                 logger.debug(f"get_or_create direct hit cache: {key}")
+                logger.debug(f"get_or_create done key={key} source=cache elapsed={(time.monotonic() - t_start):.3f}s")
                 return self._cache[key]
             session = self._load(key)
             if session is not None:
                 self._cache[key] = session
                 logger.debug(f"get_or_create direct loaded: {key} msgs={len(session.messages)}")
+                logger.debug(f"get_or_create done key={key} source=disk elapsed={(time.monotonic() - t_start):.3f}s")
                 return session
             # File doesn't exist yet — create it
             session = Session(key=key)
             self._cache[key] = session
             logger.debug(f"get_or_create direct created: {key}")
+            logger.info(
+                f"Session created (direct key) key={key} path={path} "
+                f"created_at={session.created_at.isoformat()}"
+            )
+            logger.debug(f"get_or_create done key={key} source=create elapsed={(time.monotonic() - t_start):.3f}s")
             return session
 
         # Base key — reload active index to pick up external changes
@@ -160,6 +196,9 @@ class SessionManager:
             f"cached={active_key in self._cache if active_key else 'n/a'}"
         )
         if active_key and active_key in self._cache:
+            logger.debug(
+                f"get_or_create done key={key} source=active-cache elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return self._cache[active_key]
 
         # Active key changed or not cached — load from disk
@@ -167,8 +206,15 @@ class SessionManager:
             session = self._load(active_key)
             if session is None:
                 session = Session(key=active_key)
+                logger.warning(
+                    f"Active session pointer existed but file missing, recreated empty session "
+                    f"base_key={key} active_key={active_key}"
+                )
             self._cache[active_key] = session
             logger.debug(f"get_or_create loaded from disk: {active_key} msgs={len(session.messages)}")
+            logger.debug(
+                f"get_or_create done key={key} source=active-disk elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return session
 
         # Backward compatibility: if base session file exists, use it
@@ -176,6 +222,9 @@ class SessionManager:
         if legacy is not None:
             self._set_active_key(key, key)
             self._cache[key] = legacy
+            logger.debug(
+                f"get_or_create done key={key} source=legacy elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return legacy
 
         # Create a new session for this base key
@@ -183,21 +232,37 @@ class SessionManager:
         session = Session(key=new_key)
         self._set_active_key(key, new_key)
         self._cache[new_key] = session
+        logger.info(
+            f"Session created (new active) base_key={key} new_key={new_key} "
+            f"path={self._get_session_path(new_key)}"
+        )
+        logger.debug(
+            f"get_or_create done key={key} source=new-session elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return session
 
     def start_new(self, base_key: str) -> Session:
         """Create and activate a new session for a base key."""
+        t_start = time.monotonic()
+        old_active = self._get_active_key(base_key)
         new_key = self._make_session_key(base_key)
         session = Session(key=new_key)
         self._set_active_key(base_key, new_key)
         self._cache[new_key] = session
+        logger.info(
+            f"Session start_new base_key={base_key} old_active={old_active} "
+            f"new_key={new_key} path={self._get_session_path(new_key)} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return session
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
+        t_start = time.monotonic()
         path = self._get_session_path(key)
 
         if not path.exists():
+            logger.debug(f"Session load miss key={key} path={path}")
             return None
 
         try:
@@ -219,18 +284,29 @@ class SessionManager:
                     else:
                         messages.append(data)
 
-            return Session(
+            loaded = Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 metadata=metadata
             )
+            logger.debug(
+                f"Session load success key={key} messages={len(messages)} "
+                f"metadata_keys={list(metadata.keys())}"
+            )
+            return loaded
         except Exception as e:
             logger.warning(f"Failed to load session {key}: {e}")
             return None
+        finally:
+            logger.debug(
+                f"Session load key={key} path={path} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
 
     def save(self, session: Session) -> None:
         """Save a session to disk."""
+        t_start = time.monotonic()
         path = self._get_session_path(session.key)
 
         with open(path, "w") as f:
@@ -248,6 +324,13 @@ class SessionManager:
                 f.write(json.dumps(msg) + "\n")
 
         self._cache[session.key] = session
+        logger.debug(
+            f"Session save key={session.key} messages={len(session.messages)} "
+            f"metadata_keys={list(session.metadata.keys())} "
+            f"last_message_preview={_preview(session.messages[-1].get('content') if session.messages else '')} "
+            f"path={path} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
 
     def delete(self, key: str) -> bool:
         """

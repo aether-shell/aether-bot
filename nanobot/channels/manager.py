@@ -38,6 +38,8 @@ class ChannelManager:
 
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
+        t_start = time.monotonic()
+        logger.debug("Channel manager: initializing enabled channels")
 
         # Telegram channel
         if self.config.channels.telegram.enabled:
@@ -153,15 +155,24 @@ class ChannelManager:
                 logger.info("QQ channel enabled")
             except ImportError as e:
                 logger.warning(f"QQ channel not available: {e}")
+
+        logger.debug(
+            f"Channel manager: initialized channels={list(self.channels.keys())} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
+        logger.debug(f"Channel manager: start task begin for {name}")
         try:
             await channel.start()
         except Exception as e:
             logger.error(f"Failed to start channel {name}: {e}")
+        finally:
+            logger.debug(f"Channel manager: start task ended for {name}")
 
     async def start_all(self) -> None:
         """Start all channels and the outbound dispatcher."""
+        t_start = time.monotonic()
         if not self.channels:
             logger.warning("No channels enabled")
             return
@@ -177,6 +188,7 @@ class ChannelManager:
 
         # Wait for all to complete (they should run forever)
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug(f"Channel manager: start_all returned elapsed={(time.monotonic() - t_start):.3f}s")
 
     async def stop_all(self) -> None:
         """Stop all channels and the dispatcher."""

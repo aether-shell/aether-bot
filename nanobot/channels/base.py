@@ -105,6 +105,7 @@ class BaseChannel(ABC):
             media: Optional list of media URLs.
             metadata: Optional channel-specific metadata.
         """
+        t_start = time.monotonic()
         if not self.is_allowed(sender_id):
             logger.warning(
                 f"Access denied for sender {sender_id} on channel {self.name}. "
@@ -126,7 +127,17 @@ class BaseChannel(ABC):
             metadata=meta
         )
 
+        logger.debug(
+            f"Channel {self.name} inbound sender={sender_id} chat_id={chat_id} "
+            f"chars={len(content)} media={len(media or [])} trace={meta.get('trace_id')} "
+            f"session_key={meta.get('session_key') or f'{self.name}:{chat_id}'} "
+            f"metadata_keys={sorted(list(meta.keys()))}"
+        )
         await self.bus.publish_inbound(msg)
+        logger.debug(
+            f"Channel {self.name} inbound forwarded trace={meta.get('trace_id')} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
 
     @property
     def is_running(self) -> bool:

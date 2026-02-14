@@ -210,6 +210,15 @@ class HTTPChannel(BaseChannel):
                     })
                 event_data["media"] = media_list
 
+        logger.debug(
+            f"Web send event chat_id={chat_id} trace={meta.get('trace_id', 'n/a')} "
+            f"event={event_name} stream={is_stream} final={is_final} "
+            f"session_id={session_id or 'n/a'} content_chars={len(msg.content or '')} "
+            f"context_keys={list((event_data.get('context') or {}).keys())} "
+            f"timing_keys={list((event_data.get('timing') or {}).keys())} "
+            f"media_items={len(event_data.get('media') or [])} clients={len(queues)}"
+        )
+
         # Assign incremental event ID for Last-Event-ID support
         with self._event_id_lock:
             self._event_id_counter += 1
@@ -287,11 +296,18 @@ class HTTPChannel(BaseChannel):
         content = body.get("content", "").strip()
         if not content:
             return web.json_response({"error": "empty message"}, status=400)
+        logger.debug(
+            f"Web inbound request chat_id={chat_id} sender={sender_id} "
+            f"chars={len(content)} body_keys={sorted(list(body.keys()))}"
+        )
 
         # Message deduplication
         message_id = body.get("message_id")
         if message_id:
             if message_id in self._processed_messages:
+                logger.debug(
+                    f"Web inbound duplicate ignored chat_id={chat_id} message_id={message_id}"
+                )
                 return web.json_response({"status": "duplicate"})
             self._processed_messages[message_id] = None
             if len(self._processed_messages) > 1000:
@@ -311,6 +327,7 @@ class HTTPChannel(BaseChannel):
         # Validate media paths (uploaded files)
         media_paths = body.get("media")
         validated_media = None
+        invalid_media: list[str] = []
         if media_paths and isinstance(media_paths, list):
             validated_media = []
             upload_root = str(self._upload_dir.resolve())
@@ -318,6 +335,13 @@ class HTTPChannel(BaseChannel):
                 resolved = str(pathlib.Path(p).resolve())
                 if resolved.startswith(upload_root) and pathlib.Path(resolved).exists():
                     validated_media.append(resolved)
+                else:
+                    invalid_media.append(str(p))
+        logger.debug(
+            f"Web inbound normalized chat_id={chat_id} message_id={message_id or 'n/a'} "
+            f"session_id={session_id or 'n/a'} valid_media={len(validated_media or [])} "
+            f"invalid_media={len(invalid_media)} metadata_keys={sorted(list(metadata.keys()))}"
+        )
 
         await self._handle_message(
             sender_id=sender_id,
@@ -325,6 +349,10 @@ class HTTPChannel(BaseChannel):
             content=content,
             metadata=metadata,
             media=validated_media,
+        )
+        logger.debug(
+            f"Web inbound forwarded chat_id={chat_id} session_id={session_id or 'n/a'} "
+            f"message_id={message_id or 'n/a'}"
         )
 
         # Broadcast user message to all SSE clients so other devices see it
@@ -623,6 +651,12 @@ class HTTPChannel(BaseChannel):
 
         chat_id = payload["chat_id"]
         sender_id = payload.get("sub", chat_id)
+        trace_id = f"web-new-{uuid.uuid4().hex[:8]}"
+        old_key = self._get_active_session_key(chat_id)
+        logger.info(
+            f"Trace {trace_id} new session requested chat_id={chat_id} sender={sender_id} "
+            f"active_before={old_key or 'n/a'}"
+        )
 
         # Send /new command through the agent pipeline so SessionManager
         # creates the new session in its own memory cache and on disk.
@@ -635,19 +669,31 @@ class HTTPChannel(BaseChannel):
             metadata={
                 "session_key": f"web:{chat_id}:default",
                 "_suppress_outbound": True,
+                "trace_id": trace_id,
             },
+        )
+        logger.debug(
+            f"Trace {trace_id} /new command published session_key=web:{chat_id}:default"
         )
 
         # The /new is processed async via the message bus.
         # Poll active.json briefly to pick up the new session_id.
-        old_key = self._get_active_session_key(chat_id)
         session_id = old_key or "default"
-        for _ in range(20):  # up to 2 seconds
+        for idx in range(20):  # up to 2 seconds
             await asyncio.sleep(0.1)
             new_key = self._get_active_session_key(chat_id)
+            logger.debug(
+                f"Trace {trace_id} poll active session attempt={idx + 1}/20 "
+                f"active={new_key or 'n/a'}"
+            )
             if new_key and new_key != old_key:
                 session_id = new_key
                 break
+
+        logger.info(
+            f"Trace {trace_id} new session resolved chat_id={chat_id} "
+            f"active_before={old_key or 'n/a'} active_after={session_id}"
+        )
 
         return web.json_response({
             "session": {
@@ -689,6 +735,10 @@ class HTTPChannel(BaseChannel):
         base_key = f"web:{chat_id}:{base_name}"
         active_key = f"web:{chat_id}:{session_id}"
         self._update_active_index(base_key, active_key)
+        logger.info(
+            f"Web session switched chat_id={chat_id} session_id={session_id} "
+            f"base_key={base_key} active_key={active_key}"
+        )
 
         return web.json_response({"status": "ok"})
 
@@ -723,6 +773,10 @@ class HTTPChannel(BaseChannel):
         try:
             with open(active_path, "w") as f:
                 json.dump(data, f, indent=2)
+            logger.debug(
+                f"Web active index updated path={active_path} base_key={base_key} "
+                f"active_key={active_key} entries={len(data)}"
+            )
         except Exception:
             logger.warning(f"Failed to update active.json: {base_key} -> {active_key}")
 

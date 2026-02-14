@@ -1,7 +1,10 @@
 """File system tools: read, write, edit."""
 
+import time
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
@@ -42,6 +45,7 @@ class ReadFileTool(Tool):
         }
 
     async def execute(self, path: str, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         try:
             file_path = _resolve_path(path, self._allowed_dir)
             if not file_path.exists():
@@ -50,6 +54,10 @@ class ReadFileTool(Tool):
                 return f"Error: Not a file: {path}"
 
             content = file_path.read_text(encoding="utf-8")
+            logger.debug(
+                f"ReadFileTool path={file_path} chars={len(content)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return content
         except PermissionError as e:
             return f"Error: {e}"
@@ -89,10 +97,15 @@ class WriteFileTool(Tool):
         }
 
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         try:
             file_path = _resolve_path(path, self._allowed_dir)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
+            logger.debug(
+                f"WriteFileTool path={file_path} bytes={len(content)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return f"Successfully wrote {len(content)} bytes to {path}"
         except PermissionError as e:
             return f"Error: {e}"
@@ -136,6 +149,7 @@ class EditFileTool(Tool):
         }
 
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         try:
             file_path = _resolve_path(path, self._allowed_dir)
             if not file_path.exists():
@@ -153,6 +167,10 @@ class EditFileTool(Tool):
 
             new_content = content.replace(old_text, new_text, 1)
             file_path.write_text(new_content, encoding="utf-8")
+            logger.debug(
+                f"EditFileTool path={file_path} old_len={len(old_text)} new_len={len(new_text)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
 
             return f"Successfully edited {path}"
         except PermissionError as e:
@@ -189,6 +207,7 @@ class ListDirTool(Tool):
         }
 
     async def execute(self, path: str, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         try:
             dir_path = _resolve_path(path, self._allowed_dir)
             if not dir_path.exists():
@@ -204,6 +223,10 @@ class ListDirTool(Tool):
             if not items:
                 return f"Directory {path} is empty"
 
+            logger.debug(
+                f"ListDirTool path={dir_path} entries={len(items)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return "\n".join(items)
         except PermissionError as e:
             return f"Error: {e}"

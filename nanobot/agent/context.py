@@ -5,11 +5,21 @@ import hashlib
 import mimetypes
 import platform
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+
+
+def _preview(text: str, max_chars: int = 160) -> str:
+    safe = str(text or "").replace("\n", "\\n")
+    if len(safe) <= max_chars:
+        return safe
+    return f"{safe[:max_chars]}...(truncated)"
 
 
 class ContextBuilder:
@@ -59,20 +69,27 @@ class ContextBuilder:
         Returns:
             Complete system prompt.
         """
+        t_start = time.monotonic()
         parts = []
+        section_stats: list[tuple[str, int]] = []
 
         # Core identity
-        parts.append(self._get_identity())
+        identity = self._get_identity()
+        parts.append(identity)
+        section_stats.append(("identity", len(identity)))
 
         # Bootstrap files (AGENTS.md is required)
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
+            section_stats.append(("bootstrap", len(bootstrap)))
 
         # Memory context
         memory = self.memory.get_memory_context()
         if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            memory_section = f"# Memory\n\n{memory}"
+            parts.append(memory_section)
+            section_stats.append(("memory", len(memory_section)))
 
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
@@ -80,19 +97,55 @@ class ContextBuilder:
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                always_section = f"# Active Skills\n\n{always_content}"
+                parts.append(always_section)
+                section_stats.append(("active_skills", len(always_section)))
+
+        # 1.5 Requested skills for current turn: include full content.
+        requested_skills: list[str] = []
+        if skill_names:
+            seen = set(always_skills)
+            for name in skill_names:
+                if not name or name in seen:
+                    continue
+                requested_skills.append(name)
+                seen.add(name)
+        if requested_skills:
+            requested_content = self.skills.load_skills_for_context(requested_skills)
+            if requested_content:
+                requested_section = f"""# Requested Skills (Current Turn)
+
+The current user request matched specific skills. For this turn, these rules are mandatory:
+1. Follow the requested skill workflow before free-form answering.
+2. If the skill requires real-time or external data, call tools to fetch data first.
+3. Do not guess or estimate real-time facts when a tool can retrieve them.
+4. If a required tool fails, report the failure and provide a fallback path.
+
+{requested_content}"""
+                parts.append(requested_section)
+                section_stats.append(("requested_skills", len(requested_section)))
 
         # 2. Available skills: only show summary (agent uses read_file to load)
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""# Skills
+            skills_section = f"""# Skills
 
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+Skill policy:
+- When a user request matches a skill by name or trigger, prioritize that skill workflow.
+- Read the skill's SKILL.md with read_file if you need full procedural details.
+- Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
-{skills_summary}""")
+{skills_summary}"""
+            parts.append(skills_section)
+            section_stats.append(("skills_summary", len(skills_section)))
 
-        return "\n\n---\n\n".join(parts)
+        prompt = "\n\n---\n\n".join(parts)
+        logger.debug(
+            f"ContextBuilder build_system_prompt sections={len(parts)} "
+            f"chars={len(prompt)} section_stats={section_stats} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
+        return prompt
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
@@ -124,9 +177,10 @@ Your workspace is at: {workspace_path}
 - Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
+IMPORTANT:
+- For casual conversation that does not need external data or a skill workflow, reply directly with text.
+- When the request matches a skill workflow or depends on real-time/external facts, call relevant tools first and ground your answer in tool results.
+- Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 
 Feishu support: when asked to send files or images, use the 'message' tool with the `media` field.
 This supports local file paths or URLs and will send real attachments.
@@ -136,7 +190,9 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
+        t_start = time.monotonic()
         parts = []
+        file_stats: list[tuple[str, int]] = []
 
         agents_path = self.workspace / "AGENTS.md"
         if not agents_path.exists():
@@ -152,8 +208,15 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
                     parts.append(f"## Developer Instructions (AGENTS.md)\n\n{content}")
                 else:
                     parts.append(f"## {filename}\n\n{content}")
+                file_stats.append((filename, len(content)))
 
-        return "\n\n".join(parts) if parts else ""
+        combined = "\n\n".join(parts) if parts else ""
+        logger.debug(
+            f"ContextBuilder bootstrap loaded files={len(parts)} "
+            f"chars={len(combined)} file_stats={file_stats} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
+        return combined
 
     def get_bootstrap_fingerprint(self) -> str:
         """Return a fingerprint of bootstrap files to detect changes."""
@@ -211,7 +274,9 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         Returns:
             List of messages including system prompt.
         """
+        t_start = time.monotonic()
         messages = []
+        system_chars = 0
 
         # System prompt
         if include_system:
@@ -222,6 +287,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
                 )
             if summary:
                 system_prompt += f"\n\n## Conversation Summary\n{summary}"
+            system_chars = len(system_prompt)
             messages.append({"role": "system", "content": system_prompt})
 
         # History
@@ -230,7 +296,42 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
-
+        message_stats: list[dict[str, Any]] = []
+        for idx, msg in enumerate(messages):
+            role = msg.get("role")
+            content = msg.get("content")
+            if isinstance(content, str):
+                message_stats.append(
+                    {"idx": idx, "role": role, "chars": len(content), "preview": _preview(content)}
+                )
+            elif isinstance(content, list):
+                block_types = []
+                for item in content[:8]:
+                    if isinstance(item, dict):
+                        block_types.append(str(item.get("type") or "dict"))
+                    else:
+                        block_types.append(type(item).__name__)
+                message_stats.append(
+                    {
+                        "idx": idx,
+                        "role": role,
+                        "blocks": len(content),
+                        "block_types": block_types,
+                        "preview": _preview(str(content[:2]), max_chars=120),
+                    }
+                )
+            else:
+                content_text = str(content)
+                message_stats.append(
+                    {"idx": idx, "role": role, "chars": len(content_text), "preview": _preview(content_text)}
+                )
+        logger.debug(
+            f"ContextBuilder build_messages include_system={include_system} "
+            f"history={len(history)} media={len(media or [])} messages={len(messages)} "
+            f"system_chars={system_chars} summary_chars={len(summary or '')} "
+            f"current_chars={len(current_message or '')} message_stats={message_stats} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return messages
 
     def _build_user_content(
@@ -241,10 +342,12 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
             return text
 
         images = []
+        invalid_media: list[str] = []
         for path in media:
             p = Path(path)
             mime, _ = mimetypes.guess_type(path)
             if not p.is_file() or not mime or not mime.startswith("image/"):
+                invalid_media.append(path)
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append(
@@ -252,7 +355,15 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
             )
 
         if not images:
+            logger.debug(
+                f"ContextBuilder user_content media ignored count={len(media)} "
+                f"invalid={invalid_media}"
+            )
             return text
+        logger.debug(
+            f"ContextBuilder user_content media encoded valid={len(images)} invalid={len(invalid_media)} "
+            f"text_chars={len(text or '')}"
+        )
         return images + [{"type": "text", "text": text}]
 
     def add_tool_result(

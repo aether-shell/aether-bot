@@ -182,6 +182,10 @@ class ContextConfig(BaseModel):
     summary_max_tokens: int = 1200
     summary_model: str | None = None
     enable_native_session: bool = True
+    skill_enforcement_retry: bool = False
+    # 0 disables stagnation guard. Positive values mean: break tool loop when
+    # identical tool-call+result rounds repeat this many consecutive times.
+    skill_tool_stagnation_limit: int = 0
 
 
 class AgentDefaults(BaseModel):

@@ -1,7 +1,7 @@
 ---
 name: codex
 description: Run Codex CLI in non-interactive mode (exec/review) for stable automation; optional tmux usage for interactive mode.
-metadata: {"nanobot":{"emoji":"916","os":["darwin","linux"],"requires":{"bins":["codex"]}}}
+metadata: {"nanobot":{"emoji":"🤖","os":["darwin","linux"],"requires":{"bins":["codex"]},"aliases":["codex-cli","openai-codex"],"triggers":["codex","codex cli","codex exec","codex review","use codex","run codex","用codex","调用codex","codex评审"],"allowed_tools":["exec","read_file","list_dir"]}}
 ---
 
 # codex Skill

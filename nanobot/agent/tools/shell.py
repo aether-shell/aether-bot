@@ -4,8 +4,11 @@ import asyncio
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
@@ -62,9 +65,14 @@ class ExecTool(Tool):
         }
 
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         cwd = working_dir or self.working_dir or os.getcwd()
+        logger.debug(f"ExecTool start cwd={cwd} command={command[:200]}")
         guard_error = self._guard_command(command, cwd)
         if guard_error:
+            logger.debug(
+                f"ExecTool blocked elapsed={(time.monotonic() - t_start):.3f}s reason={guard_error}"
+            )
             return guard_error
 
         try:
@@ -82,6 +90,9 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
+                logger.warning(
+                    f"ExecTool timeout after {(time.monotonic() - t_start):.3f}s command={command[:120]}"
+                )
                 return f"Error: Command timed out after {self.timeout} seconds"
 
             output_parts = []
@@ -104,9 +115,16 @@ class ExecTool(Tool):
             if len(result) > max_len:
                 result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
 
+            logger.debug(
+                f"ExecTool done exit={process.returncode} chars={len(result)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return result
 
         except Exception as e:
+            logger.warning(
+                f"ExecTool failed after {(time.monotonic() - t_start):.3f}s error={e}"
+            )
             return f"Error executing command: {str(e)}"
 
     def _guard_command(self, command: str, cwd: str) -> str | None:

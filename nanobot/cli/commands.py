@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__, __version__
+from nanobot.utils.logging import configure_logging
 
 app = typer.Typer(
     name="nanobot",
@@ -177,9 +178,14 @@ def main(
     version: bool = typer.Option(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Console log level. Defaults to NANOBOT_LOG_LEVEL or DEBUG.",
+    ),
 ):
     """nanobot - Personal AI Assistant."""
-    pass
+    configure_logging(level=log_level)
 
 
 # ============================================================================
@@ -482,9 +488,7 @@ def gateway(
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
 
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
+    configure_logging(level="DEBUG" if verbose else None, force=True)
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
 
@@ -591,7 +595,7 @@ def agent(
     session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
     show_context: bool = typer.Option(False, "--show-context", help="Show context mode and token estimates"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    logs: bool = typer.Option(True, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
     """Interact with the agent directly."""
     from nanobot.agent.loop import AgentLoop
@@ -604,6 +608,7 @@ def agent(
     provider = _make_provider(config)
 
 
+    configure_logging(force=True)
     if logs:
         logger.enable("nanobot")
     else:

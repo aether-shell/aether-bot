@@ -139,6 +139,120 @@ class SkillsLoader:
 
         return "\n".join(lines)
 
+    def select_skills_for_message(self, message: str, max_skills: int = 2) -> list[str]:
+        """
+        Select relevant available skills for a user message.
+
+        Matching strategy (in priority order):
+        1. Explicit skill mention (e.g. "weather", "$weather")
+        2. Skill trigger keywords from frontmatter metadata.nanobot.triggers
+
+        Args:
+            message: User message text.
+            max_skills: Upper bound for returned skills.
+
+        Returns:
+            Ordered skill names by confidence.
+        """
+        text = (message or "").strip()
+        if not text:
+            return []
+
+        lowered = text.lower()
+        candidates: list[tuple[int, int, str]] = []
+
+        for skill in self.list_skills(filter_unavailable=True):
+            name = skill["name"]
+            name_lower = name.lower()
+            score = 0
+            trigger_hits = 0
+
+            if self._is_explicit_skill_mention(lowered, name_lower):
+                score += 100
+
+            skill_meta = self._get_skill_meta(name)
+            raw_aliases = skill_meta.get("aliases", [])
+            aliases = raw_aliases if isinstance(raw_aliases, list) else [raw_aliases]
+            for alias in aliases:
+                alias_text = str(alias).strip().lower()
+                if not alias_text:
+                    continue
+                if self._is_explicit_skill_mention(lowered, alias_text):
+                    score += 60
+
+            raw_triggers = skill_meta.get("triggers", [])
+            triggers = raw_triggers if isinstance(raw_triggers, list) else [raw_triggers]
+            for trigger in triggers:
+                trig = str(trigger).strip().lower()
+                if not trig:
+                    continue
+                if self._message_matches_trigger(lowered, trig):
+                    trigger_hits += 1
+                    score += 20
+
+            if score > 0:
+                candidates.append((score, trigger_hits, name))
+
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        limit = max(1, int(max_skills))
+        return [name for _, _, name in candidates[:limit]]
+
+    def get_allowed_tools_for_skills(self, skill_names: list[str]) -> list[str]:
+        """
+        Collect allowed tool names from matched skills metadata.
+
+        Reads `metadata.nanobot.allowed_tools` from each skill and returns a
+        de-duplicated, order-preserving list.
+        """
+        selected: list[str] = []
+        seen: set[str] = set()
+        for name in skill_names:
+            meta = self._get_skill_meta(name)
+            raw_allowed = meta.get("allowed_tools", [])
+            allowed_items = raw_allowed if isinstance(raw_allowed, list) else [raw_allowed]
+            for tool_name in allowed_items:
+                normalized = str(tool_name).strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                selected.append(normalized)
+        return selected
+
+    def _is_explicit_skill_mention(self, message_lower: str, skill_name_lower: str) -> bool:
+        """Check whether the message explicitly names a skill."""
+        if f"${skill_name_lower}" in message_lower:
+            return True
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(skill_name_lower)}(?![a-z0-9_])",
+                message_lower,
+            )
+        )
+
+    def _message_matches_trigger(self, message_lower: str, trigger_lower: str) -> bool:
+        """Match a trigger against the message with basic language-aware heuristics."""
+        if self._contains_cjk(trigger_lower):
+            return trigger_lower in message_lower
+
+        # Multi-word or symbol-heavy triggers use substring matching.
+        if any(ch.isspace() for ch in trigger_lower) or "-" in trigger_lower or "_" in trigger_lower:
+            return trigger_lower in message_lower
+
+        # Single English-like tokens use word boundaries.
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(trigger_lower)}(?![a-z0-9])",
+                message_lower,
+            )
+        )
+
+    def _contains_cjk(self, value: str) -> bool:
+        """Return True when the string includes CJK Unified Ideographs."""
+        for ch in value:
+            if "\u4e00" <= ch <= "\u9fff":
+                return True
+        return False
+
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""
         missing = []
