@@ -220,8 +220,7 @@ def onboard():
         config = Config()
         save_config(config)
         console.print(f"[green]✓[/green] Created config at {config_path}")
-    
->>>>>>> f016025 (add feature to onboarding that will ask to generate missing workspace files)
+
     # Create workspace
     workspace = get_workspace_path()
     console.print(f"[green]✓[/green] Created workspace at {workspace}")
