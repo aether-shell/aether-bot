@@ -107,6 +107,7 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
+        memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfigT | None = None,
         cron_service: "CronService" | None = None,
@@ -124,6 +125,7 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
+        self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
