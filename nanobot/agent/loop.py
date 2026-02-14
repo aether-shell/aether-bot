@@ -107,6 +107,7 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
+        max_tokens: int = 4096,
         memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfigT | None = None,
@@ -125,6 +126,7 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
@@ -149,6 +151,8 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=self.restrict_to_workspace,
@@ -563,6 +567,8 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=None,  # No streaming on probe
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
             )
             llm_time = time.monotonic() - t_llm
             llm_total += llm_time
@@ -658,7 +664,8 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
-                temperature=self.temperature
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
             )
             last_response = response
             llm_time = time.monotonic() - t_llm
@@ -822,6 +829,8 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
             )
             llm_total += time.monotonic() - t_llm
             self._log_response_for_trace(trace_id, "forced-summary response", summary_response)
@@ -1071,7 +1080,8 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
-                temperature=self.temperature
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
             )
             last_response = response
             self._log_response_for_trace(trace_id, f"system iteration={iteration} response", response)
@@ -1156,6 +1166,8 @@ class AgentLoop:
                 model=self.model,
                 session_state=session_state,
                 on_delta=on_delta,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
             )
             self._log_response_for_trace(trace_id, "system forced-summary response", summary_response)
             logger.debug(
