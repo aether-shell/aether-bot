@@ -1,8 +1,7 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -10,6 +9,7 @@ class WhatsAppConfig(BaseModel):
     """WhatsApp channel configuration."""
     enabled: bool = False
     bridge_url: str = "ws://localhost:3001"
+    bridge_token: str = ""  # Shared token for bridge auth (optional, recommended)
     allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
 
 
@@ -182,6 +182,15 @@ class ContextConfig(BaseModel):
     summary_max_tokens: int = 1200
     summary_model: str | None = None
     enable_native_session: bool = True
+    skill_enforcement_retry: bool = False
+    # 0 disables hard round cap. Positive values mean: after this many
+    # tool-call rounds for a skill-matched request, force a no-tool summary.
+    # Applies only to matched skills marked as realtime/network constrained
+    # via skill metadata (e.g. metadata.nanobot.tool_round_limit=true).
+    skill_tool_round_limit: int = 4
+    # 0 disables stagnation guard. Positive values mean: break tool loop when
+    # identical tool-call+result rounds repeat this many consecutive times.
+    skill_tool_stagnation_limit: int = 0
 
 
 class AgentDefaults(BaseModel):
@@ -191,6 +200,7 @@ class AgentDefaults(BaseModel):
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
+    memory_window: int = 50
     stream: bool = False
     stream_min_chars: int = 120
     stream_min_interval_s: float = 0.5
@@ -216,6 +226,7 @@ class ProviderConfig(BaseModel):
 
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
+    custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -332,7 +343,6 @@ class Config(BaseSettings):
             if spec and spec.is_gateway and spec.default_api_base:
                 return spec.default_api_base
         return None
-
     def get_api_type(self, model: str | None = None) -> str | None:
         """Get API type for the active provider (e.g. openai-responses)."""
         provider = self.get_provider(model)
@@ -365,6 +375,7 @@ class Config(BaseSettings):
             return mode if mode != "auto" else None
         return None
 
-    class Config:
-        env_prefix = "NANOBOT_"
-        env_nested_delimiter = "__"
+    model_config = ConfigDict(
+        env_prefix="NANOBOT_",
+        env_nested_delimiter="__"
+    )

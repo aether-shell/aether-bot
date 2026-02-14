@@ -1258,3 +1258,44 @@ body::after {
         transition-duration: 0.01ms !important;
     }
 }
+
+/* Delivery badge (appended inside .msg-time) */
+.msg-delivery {
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+/* Sending state — pulsing dots */
+.msg-delivery.sending {
+    opacity: 0.6;
+    animation: sending-pulse 1.2s ease-in-out infinite;
+}
+
+/* Delivered state — checkmark */
+.msg-delivery.delivered {
+    opacity: 1;
+}
+
+/* Send-failed state — red exclamation */
+.msg-delivery.send-failed {
+    opacity: 1;
+    color: #ef4444;
+    font-weight: 700;
+}
+
+/* Delivery badge color for user messages */
+.message.user .msg-delivery {
+    color: var(--primary);
+}
+
+.message.user .msg-delivery.send-failed {
+    color: #ef4444;
+}
+
+@keyframes sending-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+}

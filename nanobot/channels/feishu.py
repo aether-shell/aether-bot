@@ -134,12 +134,16 @@ class FeishuChannel(BaseChannel):
             log_level=lark.LogLevel.INFO
         )
 
-        # Start WebSocket client in a separate thread
+        # Start WebSocket client in a separate thread with reconnect loop
         def run_ws():
-            try:
-                self._ws_client.start()
-            except Exception as e:
-                logger.error(f"Feishu WebSocket error: {e}")
+            while self._running:
+                try:
+                    self._ws_client.start()
+                except Exception as e:
+                    logger.warning(f"Feishu WebSocket error: {e}")
+                if self._running:
+                    import time as _time
+                    _time.sleep(5)
 
         self._ws_thread = threading.Thread(target=run_ws, daemon=True)
         self._ws_thread.start()
@@ -215,6 +219,10 @@ class FeishuChannel(BaseChannel):
         re.MULTILINE,
     )
 
+    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+
+    _CODE_BLOCK_RE = re.compile(r"(```[\s\S]*?```)", re.MULTILINE)
+
     @staticmethod
     def _parse_md_table(table_text: str) -> dict | None:
         """Parse a markdown table into a Feishu table element."""
@@ -240,20 +248,62 @@ class FeishuChannel(BaseChannel):
         }
 
     def _build_card_elements(self, content: str) -> list[dict]:
-        """Split content into markdown + table elements for Feishu card."""
+        """Split content into div/markdown + table elements for Feishu card."""
         elements: list[dict] = []
         last_end = 0
+
         for match in self._TABLE_RE.finditer(content):
-            before = content[last_end:match.start()].strip()
-            if before:
-                elements.append({"tag": "markdown", "content": before})
+            before = content[last_end:match.start()]
+            if before.strip():
+                elements.extend(self._split_headings(before))
             elements.append(
                 self._parse_md_table(match.group(1)) or {"tag": "markdown", "content": match.group(1)}
             )
             last_end = match.end()
-        remaining = content[last_end:].strip()
+
+        remaining = content[last_end:]
+        if remaining.strip():
+            elements.extend(self._split_headings(remaining))
+
+        return elements or [{"tag": "markdown", "content": content}]
+
+    def _split_headings(self, content: str) -> list[dict]:
+        """Split content by headings, converting headings to div elements."""
+        protected = content
+        code_blocks: list[str] = []
+
+        for match in self._CODE_BLOCK_RE.finditer(content):
+            code_blocks.append(match.group(1))
+            protected = protected.replace(match.group(1), f"\x00CODE{len(code_blocks) - 1}\x00", 1)
+
+        elements: list[dict] = []
+        last_end = 0
+        for match in self._HEADING_RE.finditer(protected):
+            before = protected[last_end:match.start()].strip()
+            if before:
+                elements.append({"tag": "markdown", "content": before})
+            text = match.group(2).strip()
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**{text}**",
+                    },
+                }
+            )
+            last_end = match.end()
+
+        remaining = protected[last_end:].strip()
         if remaining:
             elements.append({"tag": "markdown", "content": remaining})
+
+        for i, code_block in enumerate(code_blocks):
+            marker = f"\x00CODE{i}\x00"
+            for element in elements:
+                if element.get("tag") == "markdown":
+                    element["content"] = element["content"].replace(marker, code_block)
+
         return elements or [{"tag": "markdown", "content": content}]
 
     @staticmethod

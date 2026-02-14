@@ -1,6 +1,9 @@
 """Spawn tool for creating background subagents."""
 
+import time
 from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
@@ -57,9 +60,15 @@ class SpawnTool(Tool):
 
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
-        return await self._manager.spawn(
+        t_start = time.monotonic()
+        result = await self._manager.spawn(
             task=task,
             label=label,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
         )
+        logger.debug(
+            f"SpawnTool dispatched origin={self._origin_channel}:{self._origin_chat_id} "
+            f"label={label or '(auto)'} elapsed={(time.monotonic() - t_start):.3f}s"
+        )
+        return result

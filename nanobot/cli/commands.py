@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__, __version__
+from nanobot.utils.logging import configure_logging
 
 app = typer.Typer(
     name="nanobot",
@@ -25,6 +26,7 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+NEW_SESSION_COMMANDS = {"/new", "/reset"}
 
 # ---------------------------------------------------------------------------
 # Lightweight CLI input: readline for arrow keys / history, termios for flush
@@ -158,6 +160,11 @@ def _is_exit_command(command: str) -> bool:
     return command.lower() in EXIT_COMMANDS
 
 
+def _is_new_session_command(command: str) -> bool:
+    """Return True when input should clear the session history."""
+    return command.lower() in NEW_SESSION_COMMANDS
+
+
 async def _read_interactive_input_async() -> str:
     """Read user input with arrow keys and history (runs input() in a thread)."""
     try:
@@ -177,9 +184,14 @@ def main(
     version: bool = typer.Option(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Console log level. Defaults to NANOBOT_LOG_LEVEL or DEBUG.",
+    ),
 ):
     """nanobot - Personal AI Assistant."""
-    pass
+    configure_logging(level=log_level)
 
 
 # ============================================================================
@@ -198,18 +210,26 @@ def onboard():
 
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        if not typer.confirm("Overwrite?"):
-            raise typer.Exit()
-
-    # Create default config
-    config = Config()
-    save_config(config)
-    console.print(f"[green]✓[/green] Created config at {config_path}")
+        console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
+        console.print("  [bold]N[/bold] = keep current config unchanged")
+        if typer.confirm("Overwrite?"):
+            config = Config()
+            save_config(config)
+            # Keep this phrase for backward-compatible tests/output checks.
+            console.print(f"[green]✓[/green] Created config at {config_path}")
+        else:
+            console.print(f"[green]✓[/green] Kept existing config at {config_path}")
+    else:
+        save_config(Config())
+        console.print(f"[green]✓[/green] Created config at {config_path}")
 
     # Create workspace
     workspace = get_workspace_path()
-    console.print(f"[green]✓[/green] Created workspace at {workspace}")
-
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]✓[/green] Created workspace at {workspace}")
+    else:
+        console.print(f"[green]✓[/green] Workspace ready at {workspace}")
     # Create default bootstrap files
     _create_workspace_templates(workspace)
 
@@ -482,9 +502,7 @@ def gateway(
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
 
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
+    configure_logging(level="DEBUG" if verbose else None, force=True)
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
 
@@ -503,6 +521,8 @@ def gateway(
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
@@ -588,10 +608,10 @@ def gateway(
 @app.command()
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
-    session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
+    session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     show_context: bool = typer.Option(False, "--show-context", help="Show context mode and token estimates"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    logs: bool = typer.Option(True, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
     """Interact with the agent directly."""
     from nanobot.agent.loop import AgentLoop
@@ -604,6 +624,7 @@ def agent(
     provider = _make_provider(config)
 
 
+    configure_logging(force=True)
     if logs:
         logger.enable("nanobot")
     else:
@@ -614,6 +635,10 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
+        model=config.agents.defaults.model,
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
+        max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         stream=config.agents.defaults.stream,
@@ -676,6 +701,21 @@ def agent(
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
+
+                    if _is_new_session_command(command):
+                        with _thinking_ctx():
+                            response = await agent_loop.process_direct("/new", session_id, return_message=show_context)
+                        if show_context and response is not None:
+                            out = response.content
+                            meta = response.metadata or {}
+                            ctx_line = _format_context_status(meta)
+                            if ctx_line:
+                                console.print(f"\n{__logo__} {out}\n[dim]{ctx_line}[/dim]\n")
+                            else:
+                                console.print(f"\n{__logo__} {out}\n")
+                        else:
+                            _print_agent_response(response, render_markdown=markdown)
+                        continue
 
                     with _thinking_ctx():
                         response = await agent_loop.process_direct(user_input, session_id, return_message=show_context)
@@ -842,14 +882,19 @@ def _get_bridge_dir() -> Path:
 def channels_login():
     """Link device via QR code."""
     import subprocess
+    from nanobot.config.loader import load_config
 
+    config = load_config()
     bridge_dir = _get_bridge_dir()
 
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
 
+    env = {**os.environ}
+    if config.channels.whatsapp.bridge_token:
+        env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
     try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True)
+        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Bridge failed: {e}[/red]")
     except FileNotFoundError:

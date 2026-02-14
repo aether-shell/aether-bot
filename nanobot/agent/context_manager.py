@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -49,8 +50,15 @@ class ContextManager:
     ) -> ContextBundle:
         from nanobot.session.manager import Session
 
+        t_start = time.monotonic()
         if not isinstance(session, Session):
             raise TypeError("session must be a Session")
+
+        logger.debug(
+            f"ContextManager build_context start session={session.key} "
+            f"messages={len(session.messages)} media={len(media or [])} "
+            f"channel={channel or 'n/a'} chat_id={chat_id or 'n/a'}"
+        )
 
         ctx_meta = session.metadata.setdefault("context", {})
         llm_meta = session.metadata.setdefault("llm_session", {})
@@ -65,6 +73,14 @@ class ContextManager:
         native_enabled = bool(self.config.enable_native_session)
         native_supported = bool(self.provider.supports_native_session())
         native_ready = native_enabled and native_supported
+        summary_before = summary
+        summary_index_before = summary_index
+        logger.debug(
+            f"ContextManager state before summarize session={session.key} "
+            f"summary_chars={len(summary_before)} summary_index={summary_index_before} "
+            f"llm_prev_id={llm_meta.get('previous_response_id') or 'n/a'} "
+            f"native_enabled={native_enabled} native_supported={native_supported}"
+        )
 
         summary, summary_index, summarized = await self._maybe_summarize(
             session=session,
@@ -76,10 +92,19 @@ class ContextManager:
         ctx_meta["summary_index"] = summary_index
         if summarized:
             ctx_meta["summary_updated_at"] = datetime.now().isoformat()
+        logger.debug(
+            f"ContextManager summarize result session={session.key} "
+            f"summarized={summarized} summary_chars={len(summary_before)}->{len(summary)} "
+            f"summary_index={summary_index_before}->{summary_index}"
+        )
 
+        reset_reasons: list[str] = []
         pending_reset = bool(llm_meta.get("pending_reset"))
+        if pending_reset:
+            reset_reasons.append("pending_reset_flag")
         if summarized and native_ready:
             pending_reset = True
+            reset_reasons.append("summary_updated")
 
         bootstrap_fingerprint = self.builder.get_bootstrap_fingerprint()
         stored_fingerprint = llm_meta.get("bootstrap_fingerprint")
@@ -92,9 +117,12 @@ class ContextManager:
         if needs_bootstrap_reset:
             pending_reset = True
             llm_meta["pending_reset"] = True
+            reset_reasons.append("bootstrap_fingerprint_changed")
         llm_meta["bootstrap_fingerprint"] = bootstrap_fingerprint
         last_ratio = float(llm_meta.get("last_context_ratio") or 0.0)
         force_reset = pending_reset or (last_ratio >= self.config.hard_limit_threshold)
+        if last_ratio >= self.config.hard_limit_threshold:
+            reset_reasons.append("last_context_ratio_threshold")
 
         remaining = session.messages[summary_index:]
         remaining_tokens = self._estimate_messages_tokens(
@@ -105,6 +133,19 @@ class ContextManager:
         remaining_ratio = remaining_tokens / self._effective_window()
         if native_ready and not force_reset and remaining_ratio >= self.config.hard_limit_threshold:
             force_reset = True
+            reset_reasons.append("remaining_ratio_threshold")
+        logger.debug(
+            f"ContextManager reset decision session={session.key} "
+            f"pending_reset={pending_reset} force_reset={force_reset} "
+            f"remaining_tokens={remaining_tokens} remaining_ratio={remaining_ratio:.4f} "
+            f"last_ratio={last_ratio:.4f} reasons={reset_reasons}"
+        )
+
+        matched_skills = self.builder.skills.select_skills_for_message(current_message)
+        logger.debug(
+            f"ContextManager skill routing session={session.key} "
+            f"matched_skills={matched_skills} message_chars={len(current_message or '')}"
+        )
 
         messages: list[dict[str, Any]]
         session_state: dict[str, Any] | None
@@ -116,18 +157,28 @@ class ContextManager:
             messages = self.builder.build_messages(
                 history=[],
                 current_message=current_message,
+                skill_names=matched_skills,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
                 include_system=False,
             )
             mode = "native"
+            logger.debug(
+                f"ContextManager mode native session={session.key} "
+                f"prev_id={llm_meta.get('previous_response_id')} messages={len(messages)}"
+            )
         else:
             # New or reset session: seed with summary + recent history.
             recent = self._select_recent_messages(session, summary_index)
+            logger.debug(
+                f"ContextManager mode build history session={session.key} "
+                f"recent_count={len(recent)} summary_chars={len(summary)}"
+            )
             messages = self.builder.build_messages(
                 history=recent,
                 current_message=current_message,
+                skill_names=matched_skills,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
@@ -139,6 +190,7 @@ class ContextManager:
                 summary=summary,
                 recent=recent,
                 current_message=current_message,
+                skill_names=matched_skills,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
@@ -149,6 +201,10 @@ class ContextManager:
                 llm_meta["previous_response_id"] = None
                 llm_meta["pending_reset"] = False
                 llm_meta["last_reset_at"] = datetime.now().isoformat()
+                logger.debug(
+                    f"ContextManager reset applied session={session.key} "
+                    f"last_reset_at={llm_meta.get('last_reset_at')}"
+                )
 
         estimated_tokens = self._estimate_messages_tokens(messages)
         ratio = estimated_tokens / self._effective_window()
@@ -168,8 +224,15 @@ class ContextManager:
             "synced_reset": synced_reset,
             "native_supported": native_supported,
             "native_enabled": native_enabled,
+            "matched_skills": matched_skills,
         }
 
+        logger.debug(
+            f"ContextManager build_context done session={session.key} "
+            f"mode={mode} estimated_tokens={estimated_tokens} "
+            f"summarized={summarized} session_state={session_state or {}} "
+            f"stats={stats} elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return ContextBundle(messages=messages, session_state=session_state, stats=stats)
 
     def _shrink_history_to_budget(
@@ -178,10 +241,12 @@ class ContextManager:
         summary: str,
         recent: list[dict[str, Any]],
         current_message: str,
+        skill_names: list[str] | None,
         media: list[str] | None,
         channel: str | None,
         chat_id: str | None,
     ) -> list[dict[str, Any]]:
+        t_start = time.monotonic()
         if not recent:
             return messages
 
@@ -190,13 +255,20 @@ class ContextManager:
         budget = self._effective_window()
         estimated = self._estimate_messages_tokens(messages)
         if estimated <= budget:
+            logger.debug(
+                f"ContextManager history within budget tokens={estimated} "
+                f"budget={budget} elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return messages
 
+        dropped = 0
         while len(working) > min_recent and estimated > budget:
             working = working[1:]
+            dropped += 1
             messages = self.builder.build_messages(
                 history=working,
                 current_message=current_message,
+                skill_names=skill_names,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
@@ -205,6 +277,11 @@ class ContextManager:
             )
             estimated = self._estimate_messages_tokens(messages)
 
+        logger.debug(
+            f"ContextManager history shrink dropped={dropped} "
+            f"final_tokens={estimated} budget={budget} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return messages
 
     def update_after_response(
@@ -214,6 +291,7 @@ class ContextManager:
     ) -> None:
         from nanobot.session.manager import Session
 
+        t_start = time.monotonic()
         if not isinstance(session, Session):
             return
 
@@ -225,6 +303,11 @@ class ContextManager:
                 logger.warning("LLM error detected, clearing native session state")
                 llm_meta["previous_response_id"] = None
                 llm_meta["pending_reset"] = True
+            logger.debug(
+                f"ContextManager update_after_response error session={session.key} "
+                f"response_id={response.response_id or 'n/a'} usage={response.usage or {}} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return
 
         # Only store valid Responses API IDs (resp_* prefix)
@@ -248,9 +331,20 @@ class ContextManager:
         if isinstance(finish_reason, str) and "length" in finish_reason.lower():
             llm_meta["pending_reset"] = True
 
+        logger.debug(
+            f"ContextManager update_after_response session={session.key} "
+            f"finish={response.finish_reason} "
+            f"response_id={response.response_id or 'n/a'} "
+            f"conversation_id={response.conversation_id or 'n/a'} "
+            f"usage_prompt={response.usage.get('prompt_tokens') if response.usage else 'n/a'} "
+            f"pending_reset={llm_meta.get('pending_reset', False)} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
+
     def _select_recent_messages(self, session: "Session", summary_index: int) -> list[dict[str, Any]]:
         total = len(session.messages)
         if total == 0:
+            logger.debug(f"ContextManager recent selection session={session.key} empty")
             return []
 
         recent_target = max(1, int(self.config.recent_messages))
@@ -263,6 +357,11 @@ class ContextManager:
             start = max(0, total - min_recent)
             recent = session.messages[start:]
 
+        logger.debug(
+            f"ContextManager recent selection session={session.key} total={total} "
+            f"summary_index={summary_index} start={start} selected={len(recent)} "
+            f"recent_target={recent_target} min_recent={min_recent}"
+        )
         return [{"role": m.get("role"), "content": m.get("content")} for m in recent]
 
     async def _maybe_summarize(
@@ -271,13 +370,18 @@ class ContextManager:
         summary: str,
         summary_index: int,
     ) -> tuple[str, int, bool]:
+        t_start = time.monotonic()
         total = len(session.messages)
         if total == 0:
+            logger.debug("ContextManager summarize skipped: empty session")
             return summary, summary_index, False
 
         recent_target = max(1, int(self.config.recent_messages))
         cutoff = max(summary_index, total - recent_target)
         if cutoff <= summary_index:
+            logger.debug(
+                f"ContextManager summarize skipped: no new range summary_index={summary_index} cutoff={cutoff}"
+            )
             return summary, summary_index, False
 
         # Estimate local conversation size (summary + unsummarized messages).
@@ -289,17 +393,35 @@ class ContextManager:
         )
         ratio = local_tokens / self._effective_window()
         if ratio < self.config.summarize_threshold:
+            logger.debug(
+                f"ContextManager summarize skipped: ratio={ratio:.4f} "
+                f"threshold={self.config.summarize_threshold} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return summary, summary_index, False
 
+        logger.debug(
+            f"ContextManager summarize triggered messages={len(to_summarize)} "
+            f"ratio={ratio:.4f} threshold={self.config.summarize_threshold}"
+        )
         new_summary = await self._summarize_messages(summary, to_summarize)
         if not new_summary:
+            logger.debug(
+                f"ContextManager summarize failed to produce output "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return summary, summary_index, False
 
+        logger.debug(
+            f"ContextManager summarize complete new_chars={len(new_summary)} "
+            f"new_index={cutoff} elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return new_summary, cutoff, True
 
     async def _summarize_messages(
         self, summary: str, messages: list[dict[str, Any]]
     ) -> str | None:
+        t_start = time.monotonic()
         if not messages:
             return summary
 
@@ -319,6 +441,11 @@ class ContextManager:
             f"{formatted}\n\n"
             "Return ONLY the updated summary text."
         )
+        logger.debug(
+            f"ContextManager summarize request messages={len(messages)} "
+            f"summary_chars={len(summary_intro)} formatted_chars={len(formatted)} "
+            f"model={self.config.summary_model or self.default_model}"
+        )
 
         try:
             response = await self.provider.chat(
@@ -337,7 +464,16 @@ class ContextManager:
             return None
 
         if response and response.content:
+            logger.debug(
+                f"ContextManager summarize LLM done messages={len(messages)} "
+                f"response_chars={len(response.content)} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return response.content.strip()
+        logger.debug(
+            f"ContextManager summarize LLM empty response messages={len(messages)} "
+            f"elapsed={(time.monotonic() - t_start):.3f}s"
+        )
         return None
 
     def _format_messages(self, messages: list[dict[str, Any]]) -> str:

@@ -4,10 +4,12 @@ import html
 import json
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
@@ -62,6 +64,7 @@ class WebSearchTool(Tool):
         self.max_results = max_results
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         if not self.api_key:
             return "Error: BRAVE_API_KEY not configured"
 
@@ -85,8 +88,15 @@ class WebSearchTool(Tool):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
+            logger.debug(
+                f"WebSearchTool query={query!r} results={len(results[:n])} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return "\n".join(lines)
         except Exception as e:
+            logger.warning(
+                f"WebSearchTool failed query={query!r} elapsed={(time.monotonic() - t_start):.3f}s error={e}"
+            )
             return f"Error: {e}"
 
 
@@ -109,6 +119,7 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+        t_start = time.monotonic()
         from readability import Document
 
         max_chars = maxChars or self.max_chars
@@ -145,9 +156,17 @@ class WebFetchTool(Tool):
             if truncated:
                 text = text[:max_chars]
 
+            logger.debug(
+                f"WebFetchTool url={url} status={r.status_code} extractor={extractor} "
+                f"text_chars={len(text)} truncated={truncated} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
                               "extractor": extractor, "truncated": truncated, "length": len(text), "text": text})
         except Exception as e:
+            logger.warning(
+                f"WebFetchTool failed url={url} elapsed={(time.monotonic() - t_start):.3f}s error={e}"
+            )
             return json.dumps({"error": str(e), "url": url})
 
     def _to_markdown(self, html: str) -> str:

@@ -1,6 +1,9 @@
 """Message tool for sending messages to users."""
 
+import time
 from typing import Any, Awaitable, Callable
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
@@ -75,6 +78,7 @@ class MessageTool(Tool):
         chat_id: str | None = None,
         **kwargs: Any
     ) -> str:
+        t_start = time.monotonic()
         channel = channel or self._default_channel
         chat_id = chat_id or self._default_chat_id
 
@@ -97,8 +101,17 @@ class MessageTool(Tool):
                 "content": content,
                 "media": media or [],
             })
+            logger.debug(
+                f"MessageTool sent channel={channel} chat_id={chat_id} "
+                f"chars={len(content)} media={len(media or [])} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s"
+            )
             return f"Message sent to {channel}:{chat_id}"
         except Exception as e:
+            logger.warning(
+                f"MessageTool failed channel={channel} chat_id={chat_id} "
+                f"elapsed={(time.monotonic() - t_start):.3f}s error={e}"
+            )
             return f"Error sending message: {str(e)}"
 
     def drain_sent_messages(self) -> list[dict[str, Any]]:

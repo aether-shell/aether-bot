@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.config.schema import Config
 
 
@@ -31,15 +33,18 @@ def load_config(config_path: Path | None = None) -> Config:
     path = config_path or get_config_path()
 
     if path.exists():
+        logger.debug(f"Loading config from {path}")
         try:
             with open(path) as f:
                 data = json.load(f)
             data = _migrate_config(data)
-            return Config.model_validate(convert_keys(data))
+            config = Config.model_validate(convert_keys(data))
+            logger.debug("Config loaded successfully")
+            return config
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to load config from {path}: {e}")
-            print("Using default configuration.")
+            logger.warning(f"Failed to load config from {path}: {e}; using defaults")
 
+    logger.debug("Using default configuration")
     return Config()
 
 
@@ -60,6 +65,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
 
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    logger.debug(f"Saved config to {path}")
 
 
 def _migrate_config(data: dict) -> dict:

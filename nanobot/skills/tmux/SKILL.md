@@ -1,7 +1,7 @@
 ---
 name: tmux
 description: Remote-control tmux sessions for interactive CLIs by sending keystrokes and scraping pane output.
-metadata: {"nanobot":{"emoji":"🧵","os":["darwin","linux"],"requires":{"bins":["tmux"]}}}
+metadata: {"nanobot":{"emoji":"🧵","os":["darwin","linux"],"requires":{"bins":["tmux"]},"aliases":["terminal-multiplexer"],"triggers":["tmux","session","pane","send-keys","interactive tty","terminal session","tmux socket","tmux session","tmux窗格","交互终端","会话复用"],"allowed_tools":["exec","read_file"]}}
 ---
 
 # tmux Skill

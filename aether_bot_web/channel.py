@@ -76,6 +76,7 @@ class HTTPChannel(BaseChannel):
         self._app.router.add_post("/api/auth/login", self._handle_login)
         self._app.router.add_get("/api/auth/check", self._handle_auth_check)
         self._app.router.add_post("/api/messages", self._handle_send_message)
+        self._app.router.add_post("/api/messages/ack", self._handle_ack)
         self._app.router.add_get("/api/messages/stream", self._handle_sse)
         self._app.router.add_get("/api/sessions", self._handle_list_sessions)
         self._app.router.add_get("/api/sessions/{session_id}/messages", self._handle_session_messages)
@@ -126,6 +127,13 @@ class HTTPChannel(BaseChannel):
         # Skip messages flagged to suppress SSE delivery (e.g. /new greeting
         # which is delivered via the HTTP response instead).
         if meta.get("_suppress_outbound"):
+            preview = msg.content.replace("\n", "\\n")
+            if len(preview) > 120:
+                preview = f"{preview[:120]}...(truncated)"
+            logger.debug(
+                f"Web send suppressed chat_id={chat_id} trace={meta.get('trace_id', 'n/a')} "
+                f"chars={len(msg.content)} preview={preview}"
+            )
             return
 
         queues = self._clients.get(chat_id, [])
@@ -209,6 +217,15 @@ class HTTPChannel(BaseChannel):
                     })
                 event_data["media"] = media_list
 
+        logger.debug(
+            f"Web send event chat_id={chat_id} trace={meta.get('trace_id', 'n/a')} "
+            f"event={event_name} stream={is_stream} final={is_final} "
+            f"session_id={session_id or 'n/a'} content_chars={len(msg.content or '')} "
+            f"context_keys={list((event_data.get('context') or {}).keys())} "
+            f"timing_keys={list((event_data.get('timing') or {}).keys())} "
+            f"media_items={len(event_data.get('media') or [])} clients={len(queues)}"
+        )
+
         # Assign incremental event ID for Last-Event-ID support
         with self._event_id_lock:
             self._event_id_counter += 1
@@ -286,30 +303,54 @@ class HTTPChannel(BaseChannel):
         content = body.get("content", "").strip()
         if not content:
             return web.json_response({"error": "empty message"}, status=400)
+        logger.debug(
+            f"Web inbound request chat_id={chat_id} sender={sender_id} "
+            f"chars={len(content)} body_keys={sorted(list(body.keys()))}"
+        )
 
         # Message deduplication
         message_id = body.get("message_id")
         if message_id:
             if message_id in self._processed_messages:
+                logger.debug(
+                    f"Web inbound duplicate ignored chat_id={chat_id} message_id={message_id}"
+                )
                 return web.json_response({"status": "duplicate"})
             self._processed_messages[message_id] = None
             if len(self._processed_messages) > 1000:
                 self._processed_messages.popitem(last=False)
 
-        session_id = body.get("session_id")
+        requested_session_id = (body.get("session_id") or "").strip()
+        session_id = requested_session_id
+        # Normalize to the concrete session id whenever possible.
+        # This keeps SSE filtering stable when frontend sends base ids like
+        # "default" while the active session is "default#YYYYmmddHHMMSS".
+        if session_id and "#" not in session_id:
+            active_session_id = self._get_active_session_key(chat_id)
+            if active_session_id and (
+                active_session_id == session_id
+                or active_session_id.startswith(f"{session_id}#")
+            ):
+                session_id = active_session_id
+        elif not session_id:
+            active_session_id = self._get_active_session_key(chat_id)
+            if active_session_id:
+                session_id = active_session_id
+
         metadata: dict[str, Any] = {}
         if session_id:
             # Pass the full session key so the agent can locate the exact session
             # without relying on active.json (avoids race conditions).
             metadata["session_key"] = f"web:{chat_id}:{session_id}"
             logger.debug(
-                f"_handle_send_message: session_id={session_id} "
-                f"session_key={metadata['session_key']}"
+                f"_handle_send_message: requested_session_id={requested_session_id or 'n/a'} "
+                f"resolved_session_id={session_id} session_key={metadata['session_key']}"
             )
 
         # Validate media paths (uploaded files)
         media_paths = body.get("media")
         validated_media = None
+        invalid_media: list[str] = []
         if media_paths and isinstance(media_paths, list):
             validated_media = []
             upload_root = str(self._upload_dir.resolve())
@@ -317,6 +358,13 @@ class HTTPChannel(BaseChannel):
                 resolved = str(pathlib.Path(p).resolve())
                 if resolved.startswith(upload_root) and pathlib.Path(resolved).exists():
                     validated_media.append(resolved)
+                else:
+                    invalid_media.append(str(p))
+        logger.debug(
+            f"Web inbound normalized chat_id={chat_id} message_id={message_id or 'n/a'} "
+            f"session_id={session_id or 'n/a'} valid_media={len(validated_media or [])} "
+            f"invalid_media={len(invalid_media)} metadata_keys={sorted(list(metadata.keys()))}"
+        )
 
         await self._handle_message(
             sender_id=sender_id,
@@ -324,6 +372,10 @@ class HTTPChannel(BaseChannel):
             content=content,
             metadata=metadata,
             media=validated_media,
+        )
+        logger.debug(
+            f"Web inbound forwarded chat_id={chat_id} session_id={session_id or 'n/a'} "
+            f"message_id={message_id or 'n/a'}"
         )
 
         # Broadcast user message to all SSE clients so other devices see it
@@ -350,6 +402,36 @@ class HTTPChannel(BaseChannel):
             except asyncio.QueueFull:
                 pass
 
+        return web.json_response({"status": "ok", "session_id": session_id or ""})
+
+    async def _handle_ack(self, request: web.Request) -> web.Response:
+        payload = self._extract_auth(request)
+        if payload is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        chat_id = payload["chat_id"]
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        event_id = body.get("event_id")
+        session_id = (body.get("session_id") or "")
+        stream_id = (body.get("stream_id") or "")
+
+        try:
+            event_id_int = int(event_id)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid event_id"}, status=400)
+        if event_id_int <= 0:
+            return web.json_response({"error": "invalid event_id"}, status=400)
+
+        # TODO: persist or consume ACK for server-side redelivery / read-receipts
+        logger.debug(
+            f"Web delivered ack: chat_id={chat_id} session_id={session_id or 'n/a'} "
+            f"event_id={event_id_int} stream_id={stream_id or 'n/a'}"
+        )
         return web.json_response({"status": "ok"})
 
     # ---- SSE ----
@@ -366,6 +448,9 @@ class HTTPChannel(BaseChannel):
         if chat_id not in self._clients:
             self._clients[chat_id] = []
         self._clients[chat_id].append(queue)
+        logger.debug(
+            f"Web SSE connected chat_id={chat_id} clients={len(self._clients.get(chat_id, []))}"
+        )
 
         response = web.StreamResponse(
             status=200,
@@ -407,12 +492,17 @@ class HTTPChannel(BaseChannel):
                 except ConnectionResetError:
                     break
         except (asyncio.CancelledError, ConnectionResetError):
-            pass
+            logger.debug(f"Web SSE disconnected chat_id={chat_id}: connection reset/cancelled")
+        except Exception as e:
+            logger.warning(f"Web SSE loop error chat_id={chat_id}: {e}")
         finally:
             if chat_id in self._clients and queue in self._clients[chat_id]:
                 self._clients[chat_id].remove(queue)
                 if not self._clients[chat_id]:
                     del self._clients[chat_id]
+            logger.debug(
+                f"Web SSE closed chat_id={chat_id} clients={len(self._clients.get(chat_id, []))}"
+            )
 
         return response
 
@@ -592,6 +682,12 @@ class HTTPChannel(BaseChannel):
 
         chat_id = payload["chat_id"]
         sender_id = payload.get("sub", chat_id)
+        trace_id = f"web-new-{uuid.uuid4().hex[:8]}"
+        old_key = self._get_active_session_key(chat_id)
+        logger.info(
+            f"Trace {trace_id} new session requested chat_id={chat_id} sender={sender_id} "
+            f"active_before={old_key or 'n/a'}"
+        )
 
         # Send /new command through the agent pipeline so SessionManager
         # creates the new session in its own memory cache and on disk.
@@ -604,25 +700,42 @@ class HTTPChannel(BaseChannel):
             metadata={
                 "session_key": f"web:{chat_id}:default",
                 "_suppress_outbound": True,
+                "trace_id": trace_id,
             },
+        )
+        logger.debug(
+            f"Trace {trace_id} /new command published session_key=web:{chat_id}:default"
         )
 
         # The /new is processed async via the message bus.
         # Poll active.json briefly to pick up the new session_id.
-        old_key = self._get_active_session_key(chat_id)
         session_id = old_key or "default"
-        for _ in range(20):  # up to 2 seconds
+        for idx in range(20):  # up to 2 seconds
             await asyncio.sleep(0.1)
             new_key = self._get_active_session_key(chat_id)
+            logger.debug(
+                f"Trace {trace_id} poll active session attempt={idx + 1}/20 "
+                f"active={new_key or 'n/a'}"
+            )
             if new_key and new_key != old_key:
                 session_id = new_key
                 break
+
+        logger.info(
+            f"Trace {trace_id} new session resolved chat_id={chat_id} "
+            f"active_before={old_key or 'n/a'} active_after={session_id}"
+        )
+        greeting = "⚛ 新会话已就绪～有什么需要我做的吗？"
+        logger.info(
+            f"Trace {trace_id} new session http response session_id={session_id} "
+            f"greeting={greeting}"
+        )
 
         return web.json_response({
             "session": {
                 "session_id": session_id,
                 "title": "New Chat",
-                "greeting": "⚛ 新会话已就绪～有什么需要我做的吗？",
+                "greeting": greeting,
             }
         })
 
@@ -658,6 +771,10 @@ class HTTPChannel(BaseChannel):
         base_key = f"web:{chat_id}:{base_name}"
         active_key = f"web:{chat_id}:{session_id}"
         self._update_active_index(base_key, active_key)
+        logger.info(
+            f"Web session switched chat_id={chat_id} session_id={session_id} "
+            f"base_key={base_key} active_key={active_key}"
+        )
 
         return web.json_response({"status": "ok"})
 
@@ -692,6 +809,10 @@ class HTTPChannel(BaseChannel):
         try:
             with open(active_path, "w") as f:
                 json.dump(data, f, indent=2)
+            logger.debug(
+                f"Web active index updated path={active_path} base_key={base_key} "
+                f"active_key={active_key} entries={len(data)}"
+            )
         except Exception:
             logger.warning(f"Failed to update active.json: {base_key} -> {active_key}")
 

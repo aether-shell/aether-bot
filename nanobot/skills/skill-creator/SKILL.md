@@ -1,6 +1,7 @@
 ---
 name: skill-creator
 description: Create or update AgentSkills. Use when designing, structuring, or packaging skills with scripts, references, and assets.
+metadata: {"nanobot":{"emoji":"🛠️","aliases":["create-skill","update-skill"],"triggers":["skill creator","create skill","update skill","design skill","package skill","agent skill","编写skill","创建技能","更新技能","优化技能"],"allowed_tools":["read_file","write_file","edit_file","list_dir","exec"]}}
 ---
 
 # Skill Creator
@@ -52,7 +53,8 @@ skill-name/
 ├── SKILL.md (required)
 │   ├── YAML frontmatter metadata (required)
 │   │   ├── name: (required)
-│   │   └── description: (required)
+│   │   ├── description: (required)
+│   │   └── metadata: {"nanobot": {...}} (required in this repo)
 │   └── Markdown instructions (required)
 └── Bundled Resources (optional)
     ├── scripts/          - Executable code (Python/Bash/etc.)
@@ -64,7 +66,9 @@ skill-name/
 
 Every SKILL.md consists of:
 
-- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields that the agent reads to determine when the skill gets used, thus it is very important to be clear and comprehensive in describing what the skill is, and when it should be used.
+- **Frontmatter** (YAML): Contains `name`, `description`, and `metadata`.
+  - `metadata.nanobot.emoji`, `metadata.nanobot.triggers`, and `metadata.nanobot.allowed_tools` are required in this repository for stable routing and tool enforcement.
+  - Optional: `metadata.nanobot.aliases`, `metadata.nanobot.tool_round_limit`, `metadata.nanobot.tags`, `metadata.nanobot.categories`, `requires`, `install`.
 - **Body** (Markdown): Instructions and guidance for using the skill. Only loaded AFTER the skill triggers (if at all).
 
 #### Bundled Resources (optional)
@@ -206,8 +210,9 @@ Skill creation involves these steps:
 2. Plan reusable skill contents (scripts, references, assets)
 3. Initialize the skill (run init_skill.py)
 4. Edit the skill (implement resources and write SKILL.md)
-5. Package the skill (run package_skill.py)
-6. Iterate based on real usage
+5. Validate skill metadata (run validate_skill_metadata.py)
+6. Package the skill (run package_skill.py)
+7. Iterate based on real usage
 
 Follow these steps in order, skipping only if there is a clear reason why they are not applicable.
 
@@ -318,21 +323,71 @@ If you used `--examples`, delete any placeholder files that are not needed for t
 
 ##### Frontmatter
 
-Write the YAML frontmatter with `name` and `description`:
+Write the YAML frontmatter with `name`, `description`, and `metadata`:
 
 - `name`: The skill name
 - `description`: This is the primary triggering mechanism for your skill, and helps the agent understand when to use the skill.
   - Include both what the Skill does and specific triggers/contexts for when to use it.
   - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to the agent.
   - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when the agent needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
+  - `metadata`: JSON object for routing and runtime hints.
+  - Required in this repository:
+    - `metadata.nanobot.emoji`: short visual marker.
+    - `metadata.nanobot.triggers`: non-empty string array used by skill routing.
+    - `metadata.nanobot.allowed_tools`: non-empty string array naming the tools this skill is allowed to invoke.
+  - Recommended:
+    - `metadata.nanobot.aliases`: alternate names or shorthand forms.
+  - Optional:
+    - `metadata.nanobot.requires` and `metadata.nanobot.install`.
+    - `metadata.nanobot.tool_round_limit`: boolean hard-cap hint for tool rounds.
+    - `metadata.nanobot.tags` / `metadata.nanobot.categories`: string arrays for routing/runtime classification.
+  - Real-time/network-bound skills:
+    - Add `metadata.nanobot.tool_round_limit: true` OR include `realtime` / `network` in `metadata.nanobot.tags` (or `categories`).
+    - Either form enables skill-scoped tool round limiting in the agent loop.
 
-Do not include any other fields in YAML frontmatter.
+Example metadata:
+
+```yaml
+metadata: {"nanobot":{"emoji":"🧾","aliases":["summary"],"triggers":["summarize","summary","总结"],"allowed_tools":["exec","web_fetch"]}}
+```
+
+Example metadata for a real-time network skill:
+
+```yaml
+metadata: {"nanobot":{"emoji":"🌤️","aliases":["forecast"],"triggers":["weather","forecast","天气"],"allowed_tools":["exec","web_fetch"],"tool_round_limit":true,"tags":["realtime","network","weather"]}}
+```
 
 ##### Body
 
 Write instructions for using the skill and its bundled resources.
 
-### Step 5: Packaging a Skill
+### Step 5: Validate Skill Metadata
+
+Before packaging, validate frontmatter quality for routing:
+
+```bash
+python3 scripts/validate_skill_metadata.py --skill /path/to/skill-folder
+```
+
+Validate all built-in skills:
+
+```bash
+python3 scripts/validate_skill_metadata.py --skills-root ../
+```
+
+Validation checks:
+
+- `name`/folder consistency
+- `description` presence
+- `metadata.nanobot` object presence and JSON validity
+- required `emoji`, non-empty `triggers`, and non-empty `allowed_tools`
+- optional `aliases` type/shape
+- optional `tool_round_limit` boolean type
+- optional `tags` / `categories` non-empty string-list shape
+
+Fix validation errors before packaging.
+
+### Step 6: Packaging a Skill
 
 Once development of the skill is complete, it must be packaged into a distributable .skill file that gets shared with the user. The packaging process automatically validates the skill first to ensure it meets all requirements:
 
@@ -359,7 +414,7 @@ The packaging script will:
 
 If validation fails, the script will report the errors and exit without creating a package. Fix any validation errors and run the packaging command again.
 
-### Step 6: Iterate
+### Step 7: Iterate
 
 After testing the skill, users may request improvements. Often this happens right after using the skill, with fresh context of how the skill performed.
 
