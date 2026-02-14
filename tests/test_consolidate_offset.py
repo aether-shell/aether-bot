@@ -39,6 +39,28 @@ class TestSessionLastConsolidated:
         assert len(session.messages) == 0
         assert session.last_consolidated == 0
 
+    def test_last_consolidated_backed_by_metadata(self) -> None:
+        """Compatibility: consolidation offset is stored in session metadata."""
+        session = Session(key="test:meta-offset")
+        session.last_consolidated = 9
+        assert session.metadata.get("last_consolidated") == 9
+        assert session.last_consolidated == 9
+
+    def test_clear_resets_runtime_metadata(self) -> None:
+        """clear() should reset context/native-session runtime state."""
+        session = Session(key="test:clear-runtime")
+        session.metadata["context"] = {"summary": "x", "summary_index": 2}
+        session.metadata["llm_session"] = {"previous_response_id": "resp_123", "pending_reset": True}
+        session.last_consolidated = 6
+        session.add_message("user", "hello")
+
+        session.clear()
+
+        assert len(session.messages) == 0
+        assert session.last_consolidated == 0
+        assert "context" not in session.metadata
+        assert "llm_session" not in session.metadata
+
 
 class TestSessionImmutableHistory:
     """Test Session message immutability for cache efficiency."""
@@ -156,4 +178,3 @@ class TestSessionPersistence:
 
         session.clear()
         assert len(session.messages) == 0
-

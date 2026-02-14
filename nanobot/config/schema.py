@@ -183,6 +183,11 @@ class ContextConfig(BaseModel):
     summary_model: str | None = None
     enable_native_session: bool = True
     skill_enforcement_retry: bool = False
+    # 0 disables hard round cap. Positive values mean: after this many
+    # tool-call rounds for a skill-matched request, force a no-tool summary.
+    # Applies only to matched skills marked as realtime/network constrained
+    # via skill metadata (e.g. metadata.nanobot.tool_round_limit=true).
+    skill_tool_round_limit: int = 4
     # 0 disables stagnation guard. Positive values mean: break tool loop when
     # identical tool-call+result rounds repeat this many consecutive times.
     skill_tool_stagnation_limit: int = 0

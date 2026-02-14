@@ -53,6 +53,12 @@ def validate_string_list(value: object, field_name: str) -> list[str]:
     return errors
 
 
+def validate_optional_string_list(value: object, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    return validate_string_list(value, field_name)
+
+
 def validate_skill_file(skill_file: Path) -> list[str]:
     errors: list[str] = []
 
@@ -107,6 +113,22 @@ def validate_skill_file(skill_file: Path) -> list[str]:
     errors.extend(
         f"{skill_file}: {msg}"
         for msg in validate_string_list(allowed_tools, "metadata.nanobot.allowed_tools")
+    )
+
+    tool_round_limit = nanobot.get("tool_round_limit")
+    if tool_round_limit is not None and not isinstance(tool_round_limit, bool):
+        errors.append(f"{skill_file}: metadata.nanobot.tool_round_limit must be a boolean when present")
+
+    tags = nanobot.get("tags")
+    errors.extend(
+        f"{skill_file}: {msg}"
+        for msg in validate_optional_string_list(tags, "metadata.nanobot.tags")
+    )
+
+    categories = nanobot.get("categories")
+    errors.extend(
+        f"{skill_file}: {msg}"
+        for msg in validate_optional_string_list(categories, "metadata.nanobot.categories")
     )
 
     return errors

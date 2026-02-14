@@ -24,6 +24,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.context_manager import ContextManager
+from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.claude import ClaudeTool
 from nanobot.agent.tools.cron import CronTool
@@ -36,7 +37,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
-from nanobot.session.manager import SessionManager
+from nanobot.session.manager import Session, SessionManager
 
 
 class _StreamState:
@@ -144,6 +145,7 @@ class AgentLoop:
             builder=self.context,
             default_model=self.model,
         )
+        self._memory_consolidation_inflight: set[str] = set()
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -281,6 +283,151 @@ class AgentLoop:
     def _hash_text(value: str) -> str:
         """Return a short stable hash for potentially large text blobs."""
         return hashlib.sha1((value or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    def _schedule_memory_consolidation(self, session: Session, archive_all: bool = False) -> None:
+        """
+        Launch memory consolidation in the background.
+
+        Deduplicates by session key so bursts of inbound messages do not create
+        duplicated HISTORY.md entries for the same session.
+        """
+        run_key = f"{session.key}#archive" if archive_all else session.key
+        if run_key in self._memory_consolidation_inflight:
+            logger.debug(
+                f"Skip memory consolidation schedule: already running key={run_key}"
+            )
+            return
+        self._memory_consolidation_inflight.add(run_key)
+
+        async def _runner() -> None:
+            try:
+                await self._consolidate_memory(session, archive_all=archive_all)
+            except Exception as e:
+                logger.warning(
+                    f"Memory consolidation task failed key={run_key}: {e}"
+                )
+            finally:
+                self._memory_consolidation_inflight.discard(run_key)
+
+        asyncio.create_task(_runner())
+
+    async def _consolidate_memory(self, session: Session, archive_all: bool = False) -> None:
+        """
+        Consolidate older conversation into memory/HISTORY.md and memory/MEMORY.md.
+
+        For regular sessions, only consolidated offsets are updated (messages stay append-only).
+        For archive_all mode (used when creating /new session), all provided
+        messages are archived without mutating session state.
+        """
+        if not session.messages:
+            return
+
+        memory = MemoryStore(self.workspace)
+        total_messages = len(session.messages)
+        keep_count = 0 if archive_all else max(1, self.memory_window // 2)
+
+        if archive_all:
+            target_messages = list(session.messages)
+            logger.info(
+                f"Memory consolidation archive_all key={session.key} total={total_messages}"
+            )
+        else:
+            if total_messages <= keep_count:
+                return
+            offset = session.last_consolidated
+            if offset > total_messages:
+                offset = 0
+                session.last_consolidated = 0
+            upper = total_messages - keep_count
+            if upper <= offset:
+                logger.debug(
+                    f"Memory consolidation skipped key={session.key} "
+                    f"offset={offset} total={total_messages} keep={keep_count}"
+                )
+                return
+            target_messages = session.messages[offset:upper]
+            logger.info(
+                f"Memory consolidation started key={session.key} total={total_messages} "
+                f"process={len(target_messages)} keep={keep_count} offset={offset}"
+            )
+
+        lines: list[str] = []
+        for item in target_messages:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            role = str(item.get("role") or "unknown").upper()
+            stamp = str(item.get("timestamp") or "?")[:16]
+            lines.append(f"[{stamp}] {role}: {content}")
+
+        if not lines:
+            if not archive_all:
+                session.last_consolidated = max(0, total_messages - keep_count)
+                self.sessions.save(session)
+            return
+
+        conversation = "\n".join(lines)
+        # Keep consolidation prompt bounded for stability.
+        if len(conversation) > 20000:
+            conversation = "[truncated to latest 20000 chars]\n" + conversation[-20000:]
+
+        current_memory = memory.read_long_term()
+        prompt = f"""You are a memory consolidation agent. Return JSON with exactly these keys:
+- history_entry: 2-5 sentence event summary starting with [YYYY-MM-DD HH:MM]
+- memory_update: fully updated long-term memory text
+
+Current long-term memory:
+{current_memory or "(empty)"}
+
+Conversation chunk:
+{conversation}
+
+Respond with valid JSON only."""
+
+        try:
+            result = await self.provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You consolidate conversation history. Output JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                tools=[],
+                model=self.model,
+                temperature=min(self.temperature, 0.3),
+                max_tokens=min(self.max_tokens, 1200),
+            )
+
+            raw = (result.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("consolidation response is not a JSON object")
+
+            history_entry = str(payload.get("history_entry") or "").strip()
+            memory_update = str(payload.get("memory_update") or "").strip()
+
+            if history_entry:
+                memory.append_history(history_entry)
+            if memory_update and memory_update != current_memory.strip():
+                memory.write_long_term(memory_update)
+
+            if not archive_all:
+                session.last_consolidated = max(0, total_messages - keep_count)
+                self.sessions.save(session)
+                logger.info(
+                    f"Memory consolidation done key={session.key} "
+                    f"offset={session.last_consolidated} total={total_messages}"
+                )
+            else:
+                logger.info(
+                    f"Memory consolidation archive_all done key={session.key} "
+                    f"archived={len(target_messages)}"
+                )
+        except Exception as e:
+            logger.warning(f"Memory consolidation failed key={session.key}: {e}")
 
     def _select_iteration_tools(
         self,
@@ -435,15 +582,34 @@ class AgentLoop:
             return await self._process_system_message(msg)
 
         if self._is_new_session_command(msg.content):
+            resolved_session_key = msg.session_key
+            base_session_key = resolved_session_key.split("#", 1)[0]
             logger.info(
                 f"Trace {trace_id} new-session command detected channel={msg.channel} "
-                f"chat_id={msg.chat_id} base_session_key={msg.session_key}"
+                f"chat_id={msg.chat_id} base_session_key={base_session_key} "
+                f"resolved_session_key={resolved_session_key}"
             )
-            session = self.sessions.start_new(msg.session_key)
+            old_session = self.sessions.get_or_create(resolved_session_key)
+            archived_messages = list(old_session.messages)
+            archived_metadata = dict(old_session.metadata or {})
+            session = self.sessions.start_new(base_session_key)
             self.sessions.save(session)
+            if archived_messages:
+                archived = Session(
+                    key=old_session.key,
+                    messages=archived_messages,
+                    created_at=old_session.created_at,
+                    updated_at=old_session.updated_at,
+                    metadata=archived_metadata,
+                )
+                self._schedule_memory_consolidation(archived, archive_all=True)
             logger.info(
                 f"Trace {trace_id} new-session command completed session_key={session.key} "
                 f"messages={len(session.messages)}"
+            )
+            greeting = "⚛ 新会话已就绪～有什么需要我做的吗？"
+            logger.info(
+                f"Trace {trace_id} new-session greeting content={greeting}"
             )
             out_meta = dict(msg.metadata or {})
             out_meta.setdefault("trace_id", trace_id)
@@ -451,7 +617,7 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="⚛ 新会话已就绪～有什么需要我做的吗？",
+                content=greeting,
                 metadata=out_meta,
             )
 
@@ -485,6 +651,8 @@ class AgentLoop:
             f"Trace {trace_id} session resolved key={session.key} "
             f"history_messages={len(session.messages)} metadata_keys={list(session.metadata.keys())}"
         )
+        if len(session.messages) > self.memory_window:
+            self._schedule_memory_consolidation(session)
 
         # Update tool contexts
         message_tool = self.tools.get("message")
@@ -536,11 +704,23 @@ class AgentLoop:
             skill for skill in (ctx_stats.get("matched_skills") or [])
             if isinstance(skill, str) and skill
         ]
+        tool_round_limited_skills = self.context.skills.get_tool_round_limited_skills(matched_skills)
         skill_enforcement_attempted = False
+        raw_skill_tool_round_limit = int(getattr(self.context_config, "skill_tool_round_limit", 0) or 0)
+        skill_tool_round_limit = max(0, raw_skill_tool_round_limit)
+        if not tool_round_limited_skills:
+            skill_tool_round_limit = 0
+        skill_tool_rounds = 0
         last_tool_round_fingerprint: str | None = None
         stagnant_tool_rounds = 0
         raw_stagnation_limit = int(getattr(self.context_config, "skill_tool_stagnation_limit", 0) or 0)
         stagnation_limit = max(0, raw_stagnation_limit)
+        if matched_skills:
+            logger.debug(
+                f"Trace {trace_id} skill loop guards matched_skills={matched_skills} "
+                f"tool_round_limited_skills={tool_round_limited_skills} "
+                f"round_limit={skill_tool_round_limit} stagnation_limit={stagnation_limit}"
+            )
 
         # Native session recovery: if first LLM call in native mode fails,
         # clear stale previous_response_id and retry with full context (reset mode).
@@ -627,6 +807,15 @@ class AgentLoop:
                         )
                     iteration = 1  # Count this as first iteration
                     self._log_messages_for_trace(trace_id, "native-probe post-tools", messages)
+                    if tool_round_limited_skills and skill_tool_round_limit > 0:
+                        skill_tool_rounds = 1
+                        if skill_tool_rounds >= skill_tool_round_limit:
+                            logger.warning(
+                                f"Trace {trace_id} reached skill tool-round limit during native probe: "
+                                f"rounds={skill_tool_rounds} limit={skill_tool_round_limit} "
+                                f"matched_skills={tool_round_limited_skills}. Forcing summary."
+                            )
+                            iteration = self.max_iterations
                 else:
                     final_content = first_response.content
                     iteration = self.max_iterations  # Skip main loop
@@ -748,6 +937,16 @@ class AgentLoop:
                             f"Trace {trace_id} detected tool stagnation: identical "
                             f"tool-call+result rounds repeated {stagnant_tool_rounds} times "
                             f"(limit={stagnation_limit}). Forcing summary."
+                        )
+                        break
+
+                if tool_round_limited_skills and skill_tool_round_limit > 0:
+                    skill_tool_rounds += 1
+                    if skill_tool_rounds >= skill_tool_round_limit:
+                        logger.warning(
+                            f"Trace {trace_id} reached skill tool-round limit: "
+                            f"rounds={skill_tool_rounds} limit={skill_tool_round_limit} "
+                            f"matched_skills={tool_round_limited_skills}. Forcing summary."
                         )
                         break
             else:
@@ -966,7 +1165,7 @@ class AgentLoop:
             return False
         if "@" in first:
             first = first.split("@", 1)[0]
-        return first == "/new"
+        return first in {"/new", "/reset"}
 
     @staticmethod
     def _is_help_command(content: str) -> bool:
@@ -1234,7 +1433,8 @@ class AgentLoop:
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            metadata={"session_key": session_key},
         )
 
         response = await self._process_message(msg)

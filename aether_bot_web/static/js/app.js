@@ -241,6 +241,27 @@
     var sseReconnectTimer = null;
     var lastEventId = '';
 
+    function shouldHandleSessionEvent(eventSessionId, eventType) {
+        if (!eventSessionId) return true;
+        if (!currentSessionId) {
+            currentSessionId = eventSessionId;
+            return true;
+        }
+        if (eventSessionId === currentSessionId) return true;
+
+        // Compatibility: treat "default" and "default#timestamp" as the same
+        // session lineage and upgrade local id to the concrete one.
+        if (!currentSessionId.includes('#') && eventSessionId.indexOf(currentSessionId + '#') === 0) {
+            console.info('Session id upgraded from SSE ' + eventType + ':', currentSessionId, '->', eventSessionId);
+            currentSessionId = eventSessionId;
+            return true;
+        }
+        if (!eventSessionId.includes('#') && currentSessionId.indexOf(eventSessionId + '#') === 0) {
+            return true;
+        }
+        return false;
+    }
+
     function connectSSE() {
         if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
         if (eventSource) { eventSource.close(); eventSource = null; }
@@ -282,7 +303,7 @@
                 return;
             }
             // Verify session_id matches current session
-            if (data.session_id && currentSessionId && data.session_id !== currentSessionId) {
+            if (!shouldHandleSessionEvent(data.session_id, 'user_message')) {
                 console.debug('Ignoring user_message for different session:', data.session_id);
                 return;
             }
@@ -297,6 +318,14 @@
             if (eventSource) { eventSource.close(); eventSource = null; }
             sseReconnectTimer = setTimeout(connectSSE, 3000);
         };
+    }
+
+    function schedulePostSendCatchup() {
+        // Fallback for cases where SSE is temporarily disconnected:
+        // poll history shortly after sending so assistant replies still appear.
+        setTimeout(function () { catchUpMessages(); }, 700);
+        setTimeout(function () { catchUpMessages(); }, 2200);
+        setTimeout(function () { catchUpMessages(); }, 5000);
     }
 
     // === Visibility change: reconnect SSE + catch up missed messages ===
@@ -374,7 +403,7 @@
 
     function handleDelta(data) {
         // Verify session_id matches current session
-        if (data.session_id && currentSessionId && data.session_id !== currentSessionId) {
+        if (!shouldHandleSessionEvent(data.session_id, 'delta')) {
             console.debug('Ignoring delta for different session:', data.session_id);
             return;
         }
@@ -394,7 +423,7 @@
 
     function handleMessage(data, eventId, prevEventId) {
         // Verify session_id matches current session
-        if (data.session_id && currentSessionId && data.session_id !== currentSessionId) {
+        if (!shouldHandleSessionEvent(data.session_id, 'message')) {
             console.debug('Ignoring message for different session:', data.session_id);
             // Still refresh session list (titles may have changed)
             loadSessions();
@@ -555,6 +584,7 @@
 
         // Intercept /new command — same behavior as clicking "+" button
         if (content === '/new') {
+            console.debug('[session] intercepted /new command, creating session via HTTP');
             messageInput.value = '';
             messageInput.style.height = 'auto';
             createNewSession();
@@ -635,6 +665,16 @@
                 if (res.ok) {
                     sent = true;
                     setDelivered(userEl);
+                    try {
+                        var ack = await res.json();
+                        if (ack && ack.session_id) {
+                            currentSessionId = ack.session_id;
+                        }
+                    } catch (e) { /* ignore */ }
+                    if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+                        connectSSE();
+                    }
+                    schedulePostSendCatchup();
                 } else {
                     // Server error — retry
                     attempt++;
@@ -1113,6 +1153,7 @@
             });
             if (res.ok) {
                 const data = await res.json();
+                console.debug('[session] /api/sessions/new response', data && data.session ? data.session : data);
                 currentSessionId = data.session.session_id;
                 chatTitle.textContent = data.session.title || getBrandProductName();
                 messagesEl.innerHTML = '';
@@ -1123,6 +1164,7 @@
                     var contentEl = el.querySelector('.msg-content') || el;
                     contentEl.innerHTML = renderMarkdown(data.session.greeting);
                     scrollToBottom();
+                    console.debug('[session] rendered HTTP greeting', { session_id: currentSessionId });
                 }
                 closeSidebar();
                 loadSessions();

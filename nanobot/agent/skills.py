@@ -218,6 +218,51 @@ class SkillsLoader:
                 selected.append(normalized)
         return selected
 
+    def get_tool_round_limited_skills(self, skill_names: list[str]) -> list[str]:
+        """
+        Return matched skills that should use the tool-round hard limit.
+
+        A skill is considered limited when one of the following is true:
+        - `metadata.nanobot.tool_round_limit` is true.
+        - `metadata.nanobot.tags` or `metadata.nanobot.categories` contains
+          realtime/network style markers.
+        """
+        selected: list[str] = []
+        seen: set[str] = set()
+        marker_tags = {
+            "realtime",
+            "real-time",
+            "real_time",
+            "network",
+            "networked",
+            "live",
+            "live-data",
+            "external-data",
+            "external",
+            "weather",
+        }
+
+        for name in skill_names:
+            if name in seen:
+                continue
+            meta = self._get_skill_meta(name)
+            if not isinstance(meta, dict):
+                continue
+
+            if bool(meta.get("tool_round_limit")):
+                selected.append(name)
+                seen.add(name)
+                continue
+
+            tags = self._normalize_meta_list(meta.get("tags"))
+            categories = self._normalize_meta_list(meta.get("categories"))
+            merged = tags + [item for item in categories if item not in tags]
+            if any(tag in marker_tags for tag in merged):
+                selected.append(name)
+                seen.add(name)
+
+        return selected
+
     def _is_explicit_skill_mention(self, message_lower: str, skill_name_lower: str) -> bool:
         """Check whether the message explicitly names a skill."""
         if f"${skill_name_lower}" in message_lower:
@@ -252,6 +297,22 @@ class SkillsLoader:
             if "\u4e00" <= ch <= "\u9fff":
                 return True
         return False
+
+    def _normalize_meta_list(self, value: object) -> list[str]:
+        """Normalize frontmatter list-like values into lower-cased strings."""
+        if isinstance(value, list):
+            raw_items = value
+        elif value is None:
+            raw_items = []
+        else:
+            raw_items = [value]
+
+        normalized: list[str] = []
+        for item in raw_items:
+            text = str(item).strip().lower()
+            if text:
+                normalized.append(text)
+        return normalized
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""

@@ -44,12 +44,15 @@ def _write_skill(
     description: str,
     triggers: list[str],
     allowed_tools: list[str] | None = None,
+    extra_nanobot_meta: dict | None = None,
 ) -> None:
     skill_dir = workspace / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     nanobot_meta = {"triggers": triggers}
     if allowed_tools is not None:
         nanobot_meta["allowed_tools"] = allowed_tools
+    if extra_nanobot_meta:
+        nanobot_meta.update(extra_nanobot_meta)
     metadata = json.dumps({"nanobot": nanobot_meta}, ensure_ascii=False)
     content = (
         "---\n"
@@ -120,6 +123,30 @@ def test_skill_allowed_tools_are_collected_in_stable_order(tmp_path: Path) -> No
 
     allowed_tools = loader.get_allowed_tools_for_skills(["weather", "github"])
     assert allowed_tools == ["exec", "web_fetch", "list_dir"]
+
+
+def test_tool_round_limit_skills_use_metadata_flags(tmp_path: Path) -> None:
+    workspace = _init_workspace(tmp_path)
+    _write_skill(
+        workspace,
+        name="weather",
+        description="Get weather and forecast",
+        triggers=["weather"],
+        allowed_tools=["exec"],
+        extra_nanobot_meta={"tool_round_limit": True, "tags": ["realtime", "network"]},
+    )
+    _write_skill(
+        workspace,
+        name="github",
+        description="Interact with github",
+        triggers=["github"],
+        allowed_tools=["exec"],
+        extra_nanobot_meta={"tags": ["code", "repo"]},
+    )
+    loader = SkillsLoader(workspace, builtin_skills_dir=workspace / "_builtin_skills")
+
+    limited = loader.get_tool_round_limited_skills(["weather", "github"])
+    assert limited == ["weather"]
 
 
 def test_context_manager_routes_and_exposes_matched_skills(tmp_path: Path) -> None:

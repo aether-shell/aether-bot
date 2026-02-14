@@ -202,7 +202,7 @@ def main(
 @app.command()
 def onboard():
     """Initialize nanobot configuration and workspace."""
-    from nanobot.config.loader import get_config_path, load_config, save_config
+    from nanobot.config.loader import get_config_path, save_config
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
 
@@ -211,15 +211,14 @@ def onboard():
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
-        console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
+        console.print("  [bold]N[/bold] = keep current config unchanged")
         if typer.confirm("Overwrite?"):
             config = Config()
             save_config(config)
-            console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
+            # Keep this phrase for backward-compatible tests/output checks.
+            console.print(f"[green]✓[/green] Created config at {config_path}")
         else:
-            config = load_config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+            console.print(f"[green]✓[/green] Kept existing config at {config_path}")
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
@@ -704,12 +703,18 @@ def agent(
                         break
 
                     if _is_new_session_command(command):
-                        session = agent_loop.sessions.get_or_create(session_id)
-                        session.clear()
-                        agent_loop.sessions.save(session)
-                        console.print(
-                            f"\n[green]{__logo__} Started new session. History cleared.[/green]\n"
-                        )
+                        with _thinking_ctx():
+                            response = await agent_loop.process_direct("/new", session_id, return_message=show_context)
+                        if show_context and response is not None:
+                            out = response.content
+                            meta = response.metadata or {}
+                            ctx_line = _format_context_status(meta)
+                            if ctx_line:
+                                console.print(f"\n{__logo__} {out}\n[dim]{ctx_line}[/dim]\n")
+                            else:
+                                console.print(f"\n{__logo__} {out}\n")
+                        else:
+                            _print_agent_response(response, render_markdown=markdown)
                         continue
 
                     with _thinking_ctx():

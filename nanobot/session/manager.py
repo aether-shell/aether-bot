@@ -33,6 +33,24 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def last_consolidated(self) -> int:
+        """Backward-compatible consolidation offset stored in metadata."""
+        raw = self.metadata.get("last_consolidated", 0)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, value)
+
+    @last_consolidated.setter
+    def last_consolidated(self, value: int) -> None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 0
+        self.metadata["last_consolidated"] = max(0, parsed)
+
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
         msg = {
@@ -43,6 +61,7 @@ class Session:
         }
         self.messages.append(msg)
         self.updated_at = datetime.now()
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """
         Get message history for LLM context.
@@ -59,9 +78,14 @@ class Session:
         # Convert to LLM format (just role and content)
         return [{"role": m["role"], "content": m["content"]} for m in recent]
 
-    def clear(self) -> None:
-        """Clear all messages in the session."""
+    def clear(self, reset_runtime_state: bool = True) -> None:
+        """Clear all messages in the session and optionally reset runtime metadata."""
         self.messages = []
+        self.last_consolidated = 0
+        if reset_runtime_state:
+            # Reset context/native-session state so /new really starts fresh.
+            self.metadata.pop("context", None)
+            self.metadata.pop("llm_session", None)
         self.updated_at = datetime.now()
 
 

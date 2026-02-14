@@ -68,7 +68,7 @@ Every SKILL.md consists of:
 
 - **Frontmatter** (YAML): Contains `name`, `description`, and `metadata`.
   - `metadata.nanobot.emoji`, `metadata.nanobot.triggers`, and `metadata.nanobot.allowed_tools` are required in this repository for stable routing and tool enforcement.
-  - Optional: `metadata.nanobot.aliases`, `requires`, `install`.
+  - Optional: `metadata.nanobot.aliases`, `metadata.nanobot.tool_round_limit`, `metadata.nanobot.tags`, `metadata.nanobot.categories`, `requires`, `install`.
 - **Body** (Markdown): Instructions and guidance for using the skill. Only loaded AFTER the skill triggers (if at all).
 
 #### Bundled Resources (optional)
@@ -339,11 +339,22 @@ Write the YAML frontmatter with `name`, `description`, and `metadata`:
     - `metadata.nanobot.aliases`: alternate names or shorthand forms.
   - Optional:
     - `metadata.nanobot.requires` and `metadata.nanobot.install`.
+    - `metadata.nanobot.tool_round_limit`: boolean hard-cap hint for tool rounds.
+    - `metadata.nanobot.tags` / `metadata.nanobot.categories`: string arrays for routing/runtime classification.
+  - Real-time/network-bound skills:
+    - Add `metadata.nanobot.tool_round_limit: true` OR include `realtime` / `network` in `metadata.nanobot.tags` (or `categories`).
+    - Either form enables skill-scoped tool round limiting in the agent loop.
 
 Example metadata:
 
 ```yaml
 metadata: {"nanobot":{"emoji":"🧾","aliases":["summary"],"triggers":["summarize","summary","总结"],"allowed_tools":["exec","web_fetch"]}}
+```
+
+Example metadata for a real-time network skill:
+
+```yaml
+metadata: {"nanobot":{"emoji":"🌤️","aliases":["forecast"],"triggers":["weather","forecast","天气"],"allowed_tools":["exec","web_fetch"],"tool_round_limit":true,"tags":["realtime","network","weather"]}}
 ```
 
 ##### Body
@@ -371,6 +382,8 @@ Validation checks:
 - `metadata.nanobot` object presence and JSON validity
 - required `emoji`, non-empty `triggers`, and non-empty `allowed_tools`
 - optional `aliases` type/shape
+- optional `tool_round_limit` boolean type
+- optional `tags` / `categories` non-empty string-list shape
 
 Fix validation errors before packaging.
 

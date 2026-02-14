@@ -127,6 +127,13 @@ class HTTPChannel(BaseChannel):
         # Skip messages flagged to suppress SSE delivery (e.g. /new greeting
         # which is delivered via the HTTP response instead).
         if meta.get("_suppress_outbound"):
+            preview = msg.content.replace("\n", "\\n")
+            if len(preview) > 120:
+                preview = f"{preview[:120]}...(truncated)"
+            logger.debug(
+                f"Web send suppressed chat_id={chat_id} trace={meta.get('trace_id', 'n/a')} "
+                f"chars={len(msg.content)} preview={preview}"
+            )
             return
 
         queues = self._clients.get(chat_id, [])
@@ -313,15 +320,31 @@ class HTTPChannel(BaseChannel):
             if len(self._processed_messages) > 1000:
                 self._processed_messages.popitem(last=False)
 
-        session_id = body.get("session_id")
+        requested_session_id = (body.get("session_id") or "").strip()
+        session_id = requested_session_id
+        # Normalize to the concrete session id whenever possible.
+        # This keeps SSE filtering stable when frontend sends base ids like
+        # "default" while the active session is "default#YYYYmmddHHMMSS".
+        if session_id and "#" not in session_id:
+            active_session_id = self._get_active_session_key(chat_id)
+            if active_session_id and (
+                active_session_id == session_id
+                or active_session_id.startswith(f"{session_id}#")
+            ):
+                session_id = active_session_id
+        elif not session_id:
+            active_session_id = self._get_active_session_key(chat_id)
+            if active_session_id:
+                session_id = active_session_id
+
         metadata: dict[str, Any] = {}
         if session_id:
             # Pass the full session key so the agent can locate the exact session
             # without relying on active.json (avoids race conditions).
             metadata["session_key"] = f"web:{chat_id}:{session_id}"
             logger.debug(
-                f"_handle_send_message: session_id={session_id} "
-                f"session_key={metadata['session_key']}"
+                f"_handle_send_message: requested_session_id={requested_session_id or 'n/a'} "
+                f"resolved_session_id={session_id} session_key={metadata['session_key']}"
             )
 
         # Validate media paths (uploaded files)
@@ -379,7 +402,7 @@ class HTTPChannel(BaseChannel):
             except asyncio.QueueFull:
                 pass
 
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "session_id": session_id or ""})
 
     async def _handle_ack(self, request: web.Request) -> web.Response:
         payload = self._extract_auth(request)
@@ -425,6 +448,9 @@ class HTTPChannel(BaseChannel):
         if chat_id not in self._clients:
             self._clients[chat_id] = []
         self._clients[chat_id].append(queue)
+        logger.debug(
+            f"Web SSE connected chat_id={chat_id} clients={len(self._clients.get(chat_id, []))}"
+        )
 
         response = web.StreamResponse(
             status=200,
@@ -466,12 +492,17 @@ class HTTPChannel(BaseChannel):
                 except ConnectionResetError:
                     break
         except (asyncio.CancelledError, ConnectionResetError):
-            pass
+            logger.debug(f"Web SSE disconnected chat_id={chat_id}: connection reset/cancelled")
+        except Exception as e:
+            logger.warning(f"Web SSE loop error chat_id={chat_id}: {e}")
         finally:
             if chat_id in self._clients and queue in self._clients[chat_id]:
                 self._clients[chat_id].remove(queue)
                 if not self._clients[chat_id]:
                     del self._clients[chat_id]
+            logger.debug(
+                f"Web SSE closed chat_id={chat_id} clients={len(self._clients.get(chat_id, []))}"
+            )
 
         return response
 
@@ -694,12 +725,17 @@ class HTTPChannel(BaseChannel):
             f"Trace {trace_id} new session resolved chat_id={chat_id} "
             f"active_before={old_key or 'n/a'} active_after={session_id}"
         )
+        greeting = "⚛ 新会话已就绪～有什么需要我做的吗？"
+        logger.info(
+            f"Trace {trace_id} new session http response session_id={session_id} "
+            f"greeting={greeting}"
+        )
 
         return web.json_response({
             "session": {
                 "session_id": session_id,
                 "title": "New Chat",
-                "greeting": "⚛ 新会话已就绪～有什么需要我做的吗？",
+                "greeting": greeting,
             }
         })
 
