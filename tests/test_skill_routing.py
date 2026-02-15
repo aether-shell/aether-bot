@@ -80,6 +80,22 @@ def test_select_skills_for_message_matches_trigger_and_explicit_mention(tmp_path
     assert loader.select_skills_for_message("please use $weather for this request") == ["weather"]
 
 
+def test_recall_skill_matches_natural_trigger_phrases_from_metadata(tmp_path: Path) -> None:
+    workspace = _init_workspace(tmp_path)
+    _write_skill(
+        workspace,
+        name="recall",
+        description="Recall learned knowledge",
+        triggers=["recall", "what did we learn", "回顾一下", "之前学过", "讲一讲", "说说"],
+        allowed_tools=["read_file", "list_dir", "exec"],
+    )
+    loader = SkillsLoader(workspace, builtin_skills_dir=workspace / "_builtin_skills")
+
+    assert loader.select_skills_for_message("回顾一下我们之前学过的东西") == ["recall"]
+    assert loader.select_skills_for_message("讲一讲 python 性能优化") == ["recall"]
+    assert loader.select_skills_for_message("说说 redis 我们学过的") == ["recall"]
+
+
 def test_build_system_prompt_includes_requested_skills_section(tmp_path: Path) -> None:
     workspace = _init_workspace(tmp_path)
     _write_skill(
@@ -147,6 +163,90 @@ def test_tool_round_limit_skills_use_metadata_flags(tmp_path: Path) -> None:
 
     limited = loader.get_tool_round_limited_skills(["weather", "github"])
     assert limited == ["weather"]
+
+
+def test_workflow_policy_is_merged_from_skill_metadata(tmp_path: Path) -> None:
+    workspace = _init_workspace(tmp_path)
+    _write_skill(
+        workspace,
+        name="deep-learn",
+        description="Deep research",
+        triggers=["deep research", "深入研究"],
+        allowed_tools=["web_search", "write_file"],
+        extra_nanobot_meta={
+            "workflow": {
+                "kickoff": {
+                    "require_substantive_action": True,
+                    "substantive_tools": ["web_search", "web_fetch"],
+                    "forbid_as_first_only": ["list_dir"],
+                },
+                "completion": {
+                    "require_tool_calls": [
+                        {
+                            "name": "write_file",
+                            "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"},
+                        }
+                    ]
+                },
+                "retry": {"enforcement_retries": 1, "failure_mode": "explain_missing"},
+                "progress": {
+                    "claim_requires_actions": True,
+                    "claim_patterns": ["已完成"],
+                    "milestones": {
+                        "enabled": True,
+                        "tool_call_interval": 2,
+                        "max_messages": 3,
+                        "templates": {"kickoff": "kickoff milestone"},
+                    },
+                },
+            }
+        },
+    )
+    _write_skill(
+        workspace,
+        name="learn",
+        description="General learn",
+        triggers=["learn", "学习"],
+        allowed_tools=["web_search", "write_file"],
+        extra_nanobot_meta={
+            "workflow": {
+                "kickoff": {"substantive_tools": ["write_file"]},
+                "retry": {"enforcement_retries": 2, "failure_mode": "hard_fail"},
+                "progress": {
+                    "milestones": {
+                        "enabled": True,
+                        "tool_call_interval": 4,
+                        "max_messages": 2,
+                        "templates": {"completion_ready": "completion milestone"},
+                    }
+                },
+            }
+        },
+    )
+
+    loader = SkillsLoader(workspace, builtin_skills_dir=workspace / "_builtin_skills")
+    policy = loader.get_workflow_policy_for_skills(["deep-learn", "learn"])
+
+    assert policy["kickoff"]["require_substantive_action"] is True
+    assert policy["kickoff"]["substantive_tools"] == ["web_search", "web_fetch", "write_file"]
+    assert policy["kickoff"]["forbid_as_first_only"] == ["list_dir"]
+    assert policy["completion"]["require_tool_calls"] == [
+        {
+            "name": "write_file",
+            "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"},
+        }
+    ]
+    assert policy["retry"]["enforcement_retries"] == 2
+    assert policy["retry"]["failure_mode"] == "hard_fail"
+    assert policy["progress"]["claim_requires_actions"] is True
+    assert policy["progress"]["claim_patterns"] == ["已完成"]
+    assert policy["progress"]["milestones"]["enabled"] is True
+    assert policy["progress"]["milestones"]["tool_call_interval"] == 4
+    assert policy["progress"]["milestones"]["max_messages"] == 3
+    assert policy["progress"]["milestones"]["templates"] == {
+        "kickoff": "kickoff milestone",
+        "completion_ready": "completion milestone",
+    }
 
 
 def test_context_manager_routes_and_exposes_matched_skills(tmp_path: Path) -> None:

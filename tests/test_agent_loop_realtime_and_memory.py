@@ -229,6 +229,425 @@ def test_realtime_query_retries_once_when_model_skips_tool_calls(tmp_path: Path)
     assert any("Realtime verification retry" in str(msg.get("content")) for msg in system_reminders)
 
 
+def test_workflow_metadata_enforcement_retries_until_completion_rule_is_met(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    provider = _SequenceProvider([
+        LLMResponse(content="主人，我先给你一个计划。"),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call_workflow_1",
+                    name="write_file",
+                    arguments={
+                        "path": "memory/learnings/python-performance-optimization.md",
+                        "content": "# Python Performance Optimization\n",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(content="主人，研究已完成并已落盘。"),
+    ])
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=workspace,
+        context_config=ContextConfig(enable_native_session=False),
+    )
+
+    workflow_policy = {
+        "kickoff": {
+            "require_substantive_action": True,
+            "substantive_tools": ["web_search", "web_fetch", "write_file", "spawn"],
+            "forbid_as_first_only": ["list_dir", "exec"],
+        },
+        "completion": {
+            "require_tool_calls": [
+                {
+                    "name": "write_file",
+                    "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"},
+                }
+            ]
+        },
+        "retry": {"enforcement_retries": 1, "failure_mode": "explain_missing"},
+        "progress": {"claim_requires_actions": True, "claim_patterns": ["完成", "completed"]},
+    }
+
+    test_session = Session(key="web:test_chat:default#workflow-enforce-pass")
+    loop.sessions.get_or_create = lambda key: test_session  # type: ignore[method-assign]
+    loop.sessions.save = lambda session: None  # type: ignore[method-assign]
+
+    async def _fake_build_context(*, session, current_message, media, channel, chat_id):
+        return SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_message},
+            ],
+            session_state={},
+            stats={"mode": "stateless", "matched_skills": ["deep-learn"]},
+        )
+
+    loop.context_manager.build_context = _fake_build_context  # type: ignore[method-assign]
+    loop.context_manager.update_after_response = lambda session, response: None  # type: ignore[method-assign]
+    loop.context.skills.get_tool_round_limited_skills = lambda skill_names: []  # type: ignore[method-assign]
+    loop.context.skills.get_workflow_policy_for_skills = lambda skill_names: workflow_policy  # type: ignore[method-assign]
+
+    execute_calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def _fake_execute(name: str, arguments: dict[str, Any]) -> str:
+        execute_calls.append((name, arguments))
+        return "Successfully wrote 34 bytes to memory/learnings/python-performance-optimization.md"
+
+    loop.tools.execute = _fake_execute  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="web",
+                sender_id="user",
+                chat_id="test_chat",
+                content="深入研究一下 Python 性能优化",
+                metadata={
+                    "trace_id": "trace-workflow-enforce-pass",
+                    "session_key": "web:test_chat:default#workflow-enforce-pass",
+                },
+            )
+        )
+    )
+
+    assert outbound is not None
+    assert outbound.content == "主人，研究已完成并已落盘。"
+    assert execute_calls == [
+        (
+            "write_file",
+            {
+                "path": "memory/learnings/python-performance-optimization.md",
+                "content": "# Python Performance Optimization\n",
+            },
+        )
+    ]
+    assert len(provider.calls) == 3
+    retry_messages = [
+        msg
+        for msg in provider.calls[1]["messages"]
+        if msg.get("role") == "system" and "Workflow enforcement retry" in str(msg.get("content"))
+    ]
+    assert retry_messages
+
+
+def test_workflow_metadata_enforcement_reports_missing_when_retry_exhausted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    provider = _SequenceProvider([
+        LLMResponse(content="主人，我现在开始执行。"),
+        LLMResponse(content="主人，已完成。"),
+    ])
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=workspace,
+        context_config=ContextConfig(enable_native_session=False),
+    )
+
+    workflow_policy = {
+        "kickoff": {
+            "require_substantive_action": True,
+            "substantive_tools": ["web_search", "web_fetch", "write_file", "spawn"],
+            "forbid_as_first_only": ["list_dir", "exec"],
+        },
+        "completion": {
+            "require_tool_calls": [
+                {
+                    "name": "write_file",
+                    "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"},
+                }
+            ]
+        },
+        "retry": {"enforcement_retries": 1, "failure_mode": "explain_missing"},
+        "progress": {"claim_requires_actions": True, "claim_patterns": ["执行", "完成", "completed"]},
+    }
+
+    test_session = Session(key="web:test_chat:default#workflow-enforce-fail")
+    loop.sessions.get_or_create = lambda key: test_session  # type: ignore[method-assign]
+    loop.sessions.save = lambda session: None  # type: ignore[method-assign]
+
+    async def _fake_build_context(*, session, current_message, media, channel, chat_id):
+        return SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_message},
+            ],
+            session_state={},
+            stats={"mode": "stateless", "matched_skills": ["deep-learn"]},
+        )
+
+    loop.context_manager.build_context = _fake_build_context  # type: ignore[method-assign]
+    loop.context_manager.update_after_response = lambda session, response: None  # type: ignore[method-assign]
+    loop.context.skills.get_tool_round_limited_skills = lambda skill_names: []  # type: ignore[method-assign]
+    loop.context.skills.get_workflow_policy_for_skills = lambda skill_names: workflow_policy  # type: ignore[method-assign]
+    loop.tools.execute = lambda name, arguments: asyncio.sleep(0, result="ok")  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="web",
+                sender_id="user",
+                chat_id="test_chat",
+                content="深入研究一下 Python 性能优化",
+                metadata={
+                    "trace_id": "trace-workflow-enforce-fail",
+                    "session_key": "web:test_chat:default#workflow-enforce-fail",
+                },
+            )
+        )
+    )
+
+    assert outbound is not None
+    assert "Workflow requirements not yet satisfied" in outbound.content
+    assert "required tool call not satisfied" in outbound.content
+    assert "write_file(path_regex=" in outbound.content
+    assert len(provider.calls) == 2
+
+
+def test_workflow_milestone_progress_pushes_intermediate_messages(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    provider = _SequenceProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call_m1",
+                    name="web_search",
+                    arguments={"query": "python performance profile"},
+                )
+            ],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call_m2",
+                    name="web_fetch",
+                    arguments={"url": "https://docs.python.org/3/library/profile.html"},
+                )
+            ],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call_m3",
+                    name="write_file",
+                    arguments={
+                        "path": "memory/learnings/python-performance-optimization.md",
+                        "content": "# Python Performance Optimization\n",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(content="主人，研究已完成并已落盘。"),
+    ])
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        context_config=ContextConfig(enable_native_session=False),
+    )
+
+    workflow_policy = {
+        "kickoff": {
+            "require_substantive_action": True,
+            "substantive_tools": ["web_search", "web_fetch", "write_file", "spawn"],
+            "forbid_as_first_only": ["list_dir", "exec"],
+        },
+        "completion": {
+            "require_tool_calls": [
+                {
+                    "name": "write_file",
+                    "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"},
+                }
+            ]
+        },
+        "retry": {"enforcement_retries": 1, "failure_mode": "explain_missing"},
+        "progress": {
+            "claim_requires_actions": True,
+            "claim_patterns": ["完成", "completed"],
+            "milestones": {
+                "enabled": True,
+                "tool_call_interval": 2,
+                "max_messages": 3,
+                "templates": {
+                    "kickoff": "MILESTONE kickoff",
+                    "researching": "MILESTONE researching {source_calls} {last_tool}",
+                    "completion_ready": "MILESTONE completion",
+                },
+            },
+        },
+    }
+
+    test_session = Session(key="web:test_chat:default#workflow-milestones")
+    loop.sessions.get_or_create = lambda key: test_session  # type: ignore[method-assign]
+    loop.sessions.save = lambda session: None  # type: ignore[method-assign]
+
+    async def _fake_build_context(*, session, current_message, media, channel, chat_id):
+        return SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_message},
+            ],
+            session_state={},
+            stats={"mode": "stateless", "matched_skills": ["deep-learn"]},
+        )
+
+    loop.context_manager.build_context = _fake_build_context  # type: ignore[method-assign]
+    loop.context_manager.update_after_response = lambda session, response: None  # type: ignore[method-assign]
+    loop.context.skills.get_tool_round_limited_skills = lambda skill_names: []  # type: ignore[method-assign]
+    loop.context.skills.get_workflow_policy_for_skills = lambda skill_names: workflow_policy  # type: ignore[method-assign]
+    loop.tools.execute = lambda name, arguments: asyncio.sleep(0, result="ok")  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="web",
+                sender_id="user",
+                chat_id="test_chat",
+                content="深入研究一下 Python 性能优化",
+                metadata={
+                    "trace_id": "trace-workflow-milestones",
+                    "session_key": "web:test_chat:default#workflow-milestones",
+                },
+            )
+        )
+    )
+
+    assert outbound is not None
+    assert outbound.content == "主人，研究已完成并已落盘。"
+    assert bus.outbound_size == 3
+    pushed = [asyncio.run(bus.consume_outbound()) for _ in range(3)]
+    assert pushed[0].content == "MILESTONE kickoff"
+    assert pushed[1].content == "MILESTONE researching 2 web_fetch"
+    assert pushed[2].content == "MILESTONE completion"
+
+    assistant_messages = [m for m in test_session.messages if m["role"] == "assistant"]
+    assistant_texts = [str(m.get("content")) for m in assistant_messages]
+    assert "MILESTONE kickoff" in assistant_texts
+    assert "MILESTONE completion" in assistant_texts
+
+
+def test_workflow_milestone_progress_respects_max_messages_cap(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    provider = _SequenceProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="call_cap_1", name="web_search", arguments={"query": "x"})
+            ],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="call_cap_2", name="web_fetch", arguments={"url": "https://x"})
+            ],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call_cap_3",
+                    name="write_file",
+                    arguments={"path": "memory/learnings/x.md", "content": "# x\n"},
+                )
+            ],
+        ),
+        LLMResponse(content="completed"),
+    ])
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        context_config=ContextConfig(enable_native_session=False),
+    )
+
+    workflow_policy = {
+        "kickoff": {
+            "require_substantive_action": True,
+            "substantive_tools": ["web_search", "web_fetch", "write_file"],
+            "forbid_as_first_only": [],
+        },
+        "completion": {
+            "require_tool_calls": [
+                {"name": "write_file", "args": {"path_regex": r"^memory/learnings/[^/]+\.md$"}}
+            ]
+        },
+        "retry": {"enforcement_retries": 0, "failure_mode": "explain_missing"},
+        "progress": {
+            "claim_requires_actions": True,
+            "claim_patterns": ["completed"],
+            "milestones": {
+                "enabled": True,
+                "tool_call_interval": 1,
+                "max_messages": 2,
+                "templates": {
+                    "kickoff": "CAP kickoff",
+                    "researching": "CAP researching {source_calls}",
+                    "completion_ready": "CAP completion",
+                },
+            },
+        },
+    }
+
+    test_session = Session(key="web:test_chat:default#workflow-milestones-cap")
+    loop.sessions.get_or_create = lambda key: test_session  # type: ignore[method-assign]
+    loop.sessions.save = lambda session: None  # type: ignore[method-assign]
+
+    async def _fake_build_context(*, session, current_message, media, channel, chat_id):
+        return SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_message},
+            ],
+            session_state={},
+            stats={"mode": "stateless", "matched_skills": ["deep-learn"]},
+        )
+
+    loop.context_manager.build_context = _fake_build_context  # type: ignore[method-assign]
+    loop.context_manager.update_after_response = lambda session, response: None  # type: ignore[method-assign]
+    loop.context.skills.get_tool_round_limited_skills = lambda skill_names: []  # type: ignore[method-assign]
+    loop.context.skills.get_workflow_policy_for_skills = lambda skill_names: workflow_policy  # type: ignore[method-assign]
+    loop.tools.execute = lambda name, arguments: asyncio.sleep(0, result="ok")  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="web",
+                sender_id="user",
+                chat_id="test_chat",
+                content="deep research x",
+                metadata={
+                    "trace_id": "trace-workflow-milestones-cap",
+                    "session_key": "web:test_chat:default#workflow-milestones-cap",
+                },
+            )
+        )
+    )
+
+    assert outbound is not None
+    assert outbound.content == "completed"
+    assert bus.outbound_size == 2
+    pushed = [asyncio.run(bus.consume_outbound()) for _ in range(2)]
+    assert pushed[0].content == "CAP kickoff"
+    assert pushed[1].content.startswith("CAP researching")
+
+
 def test_memory_consolidation_filters_transient_env_failures(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)

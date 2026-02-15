@@ -1,12 +1,12 @@
 ---
 name: deep-learn
-description: "Deep multi-agent research on a topic. Spawn parallel subagents to cover different dimensions, then synthesize into comprehensive knowledge. Use when the user asks for deep research, thorough study, or multi-angle investigation — e.g. 'deep learn kubernetes networking', '深度研究 React 性能优化'."
-metadata: {"nanobot":{"emoji":"🔬","aliases":["deep-research","multi-agent-learn"],"triggers":["deep learn","deep research","深度研究","深入研究","深入学习","全面研究","deep dive"],"allowed_tools":["web_search","web_fetch","read_file","write_file","edit_file","list_dir","exec","spawn"]}}
+description: "Deep, multi-dimensional research with durable persistence. Prefer completing end-to-end in the current turn and writing final results to memory/learnings/. Use when the user asks for deep research, thorough study, or multi-angle investigation — e.g. 'deep learn kubernetes networking', '深度研究 React 性能优化'."
+metadata: {"nanobot":{"emoji":"🔬","aliases":["deep-research","multi-agent-learn"],"triggers":["deep learn","deep research","深度研究","深入研究","深入学习","全面研究","deep dive"],"allowed_tools":["web_search","web_fetch","read_file","write_file","edit_file","spawn"],"workflow":{"kickoff":{"require_substantive_action":true,"substantive_tools":["web_search","web_fetch","write_file","spawn"],"forbid_as_first_only":["list_dir","exec"]},"completion":{"require_tool_calls":[{"name":"write_file","args":{"path_regex":"^memory/learnings/[^/]+\\.md$"}}]},"retry":{"enforcement_retries":1,"failure_mode":"explain_missing"},"progress":{"claim_requires_actions":true,"claim_patterns":["executing_now","开始做","开始执行","执行中","已完成","completed"],"milestones":{"enabled":true,"tool_call_interval":3,"max_messages":3,"templates":{"kickoff":"进度：已开始执行，正在检索权威资料。","researching":"进度：资料检索中，已获取 {source_calls} 个来源。","synthesizing":"进度：正在整理关键信息并归纳结论。","completion_ready":"进度：文档已保存，正在生成最终答复。"}}}}}}
 ---
 
 # Deep Learn
 
-Conduct deep, multi-dimensional research on a topic using parallel subagents.
+Conduct deep, multi-dimensional research on a topic and persist the final synthesized result.
 
 ## Workflow
 
@@ -24,35 +24,43 @@ Conduct deep, multi-dimensional research on a topic using parallel subagents.
 2.5 **Kick off immediately when safe**:
    - If there is no update/replace conflict from step 1 and no destructive side effect, continue to step 3 in the same turn.
    - Avoid ambiguous intent wording ("I will continue later"). Clearly indicate whether execution has started.
+   - If you claim `executing_now`, you must perform substantive tool actions in this same turn.
+   - A plan-only response is invalid for `executing_now`.
 
-3. **Ensure directories**: `exec`: `mkdir -p memory/learnings/.tmp`
+3. **Substantive kickoff (mandatory)**:
+   - The first substantive action must be `web_search`/`web_fetch` or `spawn` for a real research dimension.
+   - Do not use directory listing or placeholder-only actions as kickoff.
+   - Use `write_file` to create/update working notes in `memory/learnings/.tmp/` as research progresses (parent dirs are auto-created).
 
-4. **Spawn subagents** — one `spawn` per dimension with this task template:
-   ```
-   Research "<topic>": <dimension focus>.
-   Use web_search and web_fetch to gather authoritative information.
-   Write findings to memory/learnings/.tmp/<dimension-slug>.md in markdown.
-   Include: key concepts, code examples, gotchas, and source URLs.
-   ```
-   Subagents write to `memory/learnings/.tmp/<dimension-slug>.md`. They return automatically via MessageBus when done.
+4. **Research dimensions (default: synchronous in current turn)**:
+   - For each dimension, run focused `web_search` + `web_fetch`.
+   - Write intermediate notes to `memory/learnings/.tmp/<dimension-slug>.md` with `write_file`.
+   - Keep each dimension non-overlapping and source-backed.
 
-5. **Synthesize** — after all subagents complete:
-   - Read all `.tmp/*.md` files.
+5. **Optional parallel mode (only when explicitly requested or clearly beneficial)**:
+   - Use `spawn` for dimension tasks only if the user asked for background/parallel execution, or the topic is too large for one turn.
+   - If using `spawn`, still continue orchestration and **do not** claim completion until final synthesis is saved.
+   - Subagent "completed successfully" announcements are intermediate signals, not final user completion.
+
+6. **Synthesize**:
+   - Read all relevant `.tmp/*.md` notes.
    - De-duplicate overlapping content.
    - Cross-validate facts across dimensions.
    - Organize into the standard knowledge file format (see below).
    - Add an **Advanced Topics** section covering cross-cutting concerns.
 
-6. **Save** with `write_file` to `memory/learnings/<slug>.md`. Extra frontmatter fields:
+7. **Save (mandatory before completion)** with `write_file` to `memory/learnings/<slug>.md`. Extra frontmatter fields:
    ```yaml
    research_depth: "deep"
    agents_used: N
-   strategy: "subagents"
+   strategy: "single-agent|subagents"
    ```
 
-7. **Clean up**: `exec`: `rm -rf memory/learnings/.tmp`
+8. **Optional cleanup**:
+   - Keep `.tmp` notes by default for traceability/reproducibility.
+   - If you do cleanup by other means, never remove the final `memory/learnings/<slug>.md`.
 
-8. **Report**: Dimensions covered, agents used, total sources, 3-5 key findings as bullet points.
+9. **Report**: Dimensions covered, agents used, total sources, 3-5 key findings as bullet points, and the saved file path.
 
 ## File Format
 

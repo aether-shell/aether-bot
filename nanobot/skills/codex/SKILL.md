@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Run Codex CLI in non-interactive mode (exec/review) for stable automation; optional tmux usage for interactive mode.
+description: Run Codex CLI in non-interactive mode (exec/review) for stable automation; optional tmux usage for interactive mode. Use when the user asks to run Codex for coding or review workflows.
 metadata: {"nanobot":{"emoji":"🤖","os":["darwin","linux"],"requires":{"bins":["codex"]},"aliases":["codex-cli","openai-codex"],"triggers":["codex","codex cli","codex exec","codex review","use codex","run codex","用codex","调用codex","codex评审"],"allowed_tools":["exec","read_file","list_dir"]}}
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: weather
-description: Get current weather and forecasts (no API key required).
+description: Get current weather and forecasts (no API key required). Use when the user asks for live weather conditions, forecasts, or weather-based planning.
 homepage: https://wttr.in/:help
 metadata: {"nanobot":{"emoji":"🌤️","requires":{"bins":["curl"]},"aliases":["forecast"],"triggers":["weather","forecast","temperature","rain","snow","wind","humidity","today weather","天气","气温","温度","降雨","下雨","下雪","风力","今天天气","天气预报"],"allowed_tools":["exec","web_search","web_fetch"],"tool_round_limit":true,"tags":["realtime","network","weather"]}}
 ---

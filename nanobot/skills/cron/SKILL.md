@@ -1,6 +1,6 @@
 ---
 name: cron
-description: Schedule reminders and recurring tasks.
+description: Schedule reminders and recurring tasks. Use when the user asks for reminders, periodic checks, or one-time scheduled tasks.
 metadata: {"nanobot":{"emoji":"⏰","aliases":["scheduler","reminder"],"triggers":["cron","schedule","scheduler","remind","reminder","recurring task","every day","every week","every month","定时","提醒","每天","每周","每月","周期任务","定时任务"],"allowed_tools":["cron"]}}
 ---
 

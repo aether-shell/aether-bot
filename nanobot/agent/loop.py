@@ -223,10 +223,10 @@ class AgentLoop:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
-        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
+        self.tools.register(ReadFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(ListDirTool(allowed_dir=allowed_dir, base_dir=self.workspace))
 
         # Shell tool
         self.tools.register(ExecTool(
@@ -504,6 +504,467 @@ class AgentLoop:
             return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
         except Exception:
             return str(arguments)
+
+    @staticmethod
+    def _workflow_retry_limit(policy: dict[str, Any]) -> int:
+        """Return retry count from merged workflow policy."""
+        retry_cfg = policy.get("retry") if isinstance(policy, dict) else None
+        if not isinstance(retry_cfg, dict):
+            return 0
+        try:
+            return max(0, int(retry_cfg.get("enforcement_retries") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _workflow_failure_mode(policy: dict[str, Any]) -> str:
+        retry_cfg = policy.get("retry") if isinstance(policy, dict) else None
+        if not isinstance(retry_cfg, dict):
+            return "explain_missing"
+        mode = str(retry_cfg.get("failure_mode") or "explain_missing").strip().lower()
+        return mode if mode in {"explain_missing", "hard_fail"} else "explain_missing"
+
+    @staticmethod
+    def _workflow_rule_matches_event(rule: dict[str, Any], event: dict[str, Any]) -> bool:
+        """Return True when a tool event satisfies one workflow rule."""
+        if not isinstance(rule, dict) or not isinstance(event, dict):
+            return False
+        rule_name = str(rule.get("name") or "").strip().lower()
+        event_name = str(event.get("name") or "").strip().lower()
+        if not rule_name or rule_name != event_name:
+            return False
+
+        args_matchers = rule.get("args")
+        if not isinstance(args_matchers, dict) or not args_matchers:
+            return True
+
+        event_args = event.get("arguments")
+        if not isinstance(event_args, dict):
+            return False
+
+        for matcher_key, matcher_value in args_matchers.items():
+            matcher_key_text = str(matcher_key).strip()
+            if not matcher_key_text:
+                continue
+            matcher_text = str(matcher_value or "")
+
+            if matcher_key_text.endswith("_regex"):
+                arg_name = matcher_key_text[:-6]
+                candidate = str(event_args.get(arg_name, ""))
+                try:
+                    if not re.search(matcher_text, candidate):
+                        return False
+                except re.error:
+                    return False
+            else:
+                candidate = event_args.get(matcher_key_text)
+                if str(candidate) != matcher_text:
+                    return False
+        return True
+
+    @staticmethod
+    def _workflow_tool_rule_label(rule: dict[str, Any]) -> str:
+        """Render a compact human-readable workflow rule summary."""
+        if not isinstance(rule, dict):
+            return "invalid_tool_rule"
+        name = str(rule.get("name") or "unknown")
+        args = rule.get("args")
+        if not isinstance(args, dict) or not args:
+            return f"{name}()"
+        parts: list[str] = []
+        for key, value in args.items():
+            parts.append(f"{key}={value}")
+        return f"{name}({', '.join(parts)})"
+
+    def _validate_workflow_requirements(
+        self,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+        draft_content: str | None,
+    ) -> list[str]:
+        """
+        Validate workflow requirements against current tool events and draft output.
+        Returns missing requirement messages (empty means pass).
+        """
+        if not policy:
+            return []
+
+        missing: list[str] = []
+
+        kickoff = policy.get("kickoff")
+        if isinstance(kickoff, dict):
+            require_substantive = bool(kickoff.get("require_substantive_action"))
+            substantive_tools = [
+                str(name).strip().lower()
+                for name in kickoff.get("substantive_tools", [])
+                if str(name).strip()
+            ]
+            forbid_first = {
+                str(name).strip().lower()
+                for name in kickoff.get("forbid_as_first_only", [])
+                if str(name).strip()
+            }
+
+            first_tool_name = ""
+            if tool_events:
+                first_tool_name = str(tool_events[0].get("name") or "").strip().lower()
+
+            substantive_seen = False
+            if substantive_tools:
+                substantive_seen = any(
+                    str(event.get("name") or "").strip().lower() in substantive_tools
+                    for event in tool_events
+                )
+            elif tool_events:
+                substantive_seen = True
+
+            if require_substantive and not substantive_seen:
+                if substantive_tools:
+                    missing.append(
+                        "missing substantive tool action from: "
+                        + ", ".join(sorted(set(substantive_tools)))
+                    )
+                else:
+                    missing.append("missing substantive tool action")
+
+            if require_substantive and first_tool_name and first_tool_name in forbid_first:
+                missing.append(f"first tool call `{first_tool_name}` is disallowed for kickoff")
+
+        completion = policy.get("completion")
+        if isinstance(completion, dict):
+            raw_rules = completion.get("require_tool_calls")
+            if isinstance(raw_rules, list):
+                for raw_rule in raw_rules:
+                    if not isinstance(raw_rule, dict):
+                        continue
+                    matched = any(
+                        self._workflow_rule_matches_event(raw_rule, event)
+                        for event in tool_events
+                    )
+                    if not matched:
+                        missing.append(
+                            "required tool call not satisfied: "
+                            + self._workflow_tool_rule_label(raw_rule)
+                        )
+
+        progress = policy.get("progress")
+        if isinstance(progress, dict) and bool(progress.get("claim_requires_actions")):
+            claim_patterns = [
+                str(p).strip()
+                for p in progress.get("claim_patterns", [])
+                if str(p).strip()
+            ]
+            text = str(draft_content or "")
+            claim_found = False
+            if claim_patterns and text:
+                lowered = text.lower()
+                claim_found = any(pattern.lower() in lowered for pattern in claim_patterns)
+            elif text:
+                claim_found = True
+
+            if claim_found:
+                substantive_tools = [
+                    str(name).strip().lower()
+                    for name in (policy.get("kickoff", {}) or {}).get("substantive_tools", [])
+                    if str(name).strip()
+                ]
+                if substantive_tools:
+                    substantive_seen = any(
+                        str(event.get("name") or "").strip().lower() in substantive_tools
+                        for event in tool_events
+                    )
+                else:
+                    substantive_seen = bool(tool_events)
+                if not substantive_seen:
+                    missing.append("progress/completion claim present without substantive actions")
+
+        return missing
+
+    @staticmethod
+    def _format_workflow_missing(missing: list[str]) -> str:
+        if not missing:
+            return ""
+        lines = "\n".join(f"- {item}" for item in missing)
+        return lines
+
+    def _apply_workflow_failure(
+        self,
+        content: str | None,
+        missing: list[str],
+        policy: dict[str, Any],
+    ) -> str:
+        """Return a user-visible message when workflow requirements are unmet."""
+        details = self._format_workflow_missing(missing)
+        mode = self._workflow_failure_mode(policy)
+        if mode == "hard_fail":
+            if details:
+                return (
+                    "Workflow requirements were not satisfied. This task is not complete.\n"
+                    f"{details}"
+                )
+            return "Workflow requirements were not satisfied. This task is not complete."
+
+        base = (content or "").strip()
+        warning_header = "Workflow requirements not yet satisfied:"
+        if warning_header in base:
+            return base
+        if details:
+            if base:
+                return f"{base}\n\n{warning_header}\n{details}"
+            return f"{warning_header}\n{details}"
+        if base:
+            return f"{base}\n\n{warning_header}"
+        return warning_header
+
+    @staticmethod
+    def _workflow_substantive_tools(policy: dict[str, Any]) -> set[str]:
+        kickoff = policy.get("kickoff") if isinstance(policy, dict) else None
+        if not isinstance(kickoff, dict):
+            return set()
+        return {
+            str(name).strip().lower()
+            for name in kickoff.get("substantive_tools", [])
+            if str(name).strip()
+        }
+
+    def _workflow_completion_rules(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
+        completion = policy.get("completion") if isinstance(policy, dict) else None
+        if not isinstance(completion, dict):
+            return []
+        raw_rules = completion.get("require_tool_calls")
+        if not isinstance(raw_rules, list):
+            return []
+        return [rule for rule in raw_rules if isinstance(rule, dict)]
+
+    def _workflow_completion_progress(
+        self,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+    ) -> tuple[int, int]:
+        rules = self._workflow_completion_rules(policy)
+        if not rules:
+            return 0, 0
+        satisfied = 0
+        for rule in rules:
+            if any(self._workflow_rule_matches_event(rule, event) for event in tool_events):
+                satisfied += 1
+        return satisfied, len(rules)
+
+    @staticmethod
+    def _workflow_progress_milestones(policy: dict[str, Any]) -> dict[str, Any]:
+        progress = policy.get("progress") if isinstance(policy, dict) else None
+        if not isinstance(progress, dict):
+            return {}
+        raw_milestones = progress.get("milestones")
+        if not isinstance(raw_milestones, dict):
+            return {}
+        if not bool(raw_milestones.get("enabled")):
+            return {}
+
+        try:
+            interval = int(raw_milestones.get("tool_call_interval") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        interval = max(0, interval)
+
+        try:
+            max_messages = int(raw_milestones.get("max_messages") or 3)
+        except (TypeError, ValueError):
+            max_messages = 3
+        max_messages = max(1, max_messages)
+
+        default_templates = {
+            "kickoff": (
+                "进度：已开始执行，正在检索权威资料。"
+            ),
+            "researching": (
+                "进度：资料检索中，已获取 {source_calls} 个来源。"
+            ),
+            "synthesizing": (
+                "进度：正在整理关键信息并归纳结论。"
+            ),
+            "saving": (
+                "进度：正在写入知识库文档。"
+            ),
+            "completion_ready": (
+                "进度：文档已保存，正在生成最终答复。"
+            ),
+        }
+        templates: dict[str, str] = {}
+        raw_templates = raw_milestones.get("templates")
+        for key, default_text in default_templates.items():
+            custom = ""
+            if isinstance(raw_templates, dict):
+                custom = str(raw_templates.get(key) or "").strip()
+            templates[key] = custom or default_text
+
+        return {
+            "enabled": True,
+            "tool_call_interval": interval,
+            "max_messages": max_messages,
+            "templates": templates,
+        }
+
+    @staticmethod
+    def _workflow_stage_template(
+        templates: dict[str, Any],
+        stage: str,
+    ) -> str:
+        if not isinstance(templates, dict):
+            return ""
+        aliases: dict[str, list[str]] = {
+            "kickoff": ["kickoff"],
+            # Backward compatible alias for older metadata.
+            "researching": ["researching", "tool_progress"],
+            "synthesizing": ["synthesizing"],
+            "saving": ["saving"],
+            "completion_ready": ["completion_ready"],
+        }
+        keys = aliases.get(stage, [stage])
+        for key in keys:
+            value = str(templates.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _format_progress_template(template: str, values: dict[str, Any]) -> str:
+        class _SafeDict(dict[str, Any]):
+            def __missing__(self, key: str) -> str:
+                return "{" + key + "}"
+
+        return template.format_map(_SafeDict(values))
+
+    async def _maybe_emit_workflow_milestone(
+        self,
+        msg: InboundMessage,
+        trace_id: str,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> None:
+        config = state.get("config")
+        if not isinstance(config, dict) or not config:
+            return
+        if not tool_events:
+            return
+
+        sent_count = int(state.get("sent_count") or 0)
+        max_messages = int(config.get("max_messages") or 0)
+        if max_messages > 0 and sent_count >= max_messages:
+            return
+
+        sent_keys = state.get("sent_keys")
+        if not isinstance(sent_keys, set):
+            sent_keys = set()
+            state["sent_keys"] = sent_keys
+
+        tool_calls = len(tool_events)
+        last_tool = str(tool_events[-1].get("name") or "").strip().lower()
+        source_tools = {"web_search", "web_fetch"}
+        source_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() in source_tools
+        )
+        synthesis_tools = {"read_file", "edit_file"}
+        synthesis_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() in synthesis_tools
+        )
+        save_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() == "write_file"
+        )
+
+        substantive_tools = self._workflow_substantive_tools(policy)
+        substantive_count = 0
+        if substantive_tools:
+            substantive_count = sum(
+                1
+                for event in tool_events
+                if str(event.get("name") or "").strip().lower() in substantive_tools
+            )
+        else:
+            substantive_count = len(tool_events)
+        substantive_seen = substantive_count > 0
+
+        satisfied_rules, total_rules = self._workflow_completion_progress(policy, tool_events)
+        completion_ready = total_rules > 0 and satisfied_rules >= total_rules
+        completion_progress = (
+            f"{satisfied_rules}/{total_rules}" if total_rules > 0 else "n/a"
+        )
+
+        stage = ""
+
+        if completion_ready and "completion_ready" not in sent_keys:
+            stage = "completion_ready"
+        elif save_calls > 0 and "saving" not in sent_keys:
+            stage = "saving"
+        elif source_calls >= 2 and "researching" not in sent_keys:
+            stage = "researching"
+        elif source_calls > 0 and synthesis_calls > 0 and "synthesizing" not in sent_keys:
+            stage = "synthesizing"
+        elif substantive_seen and "kickoff" not in sent_keys:
+            stage = "kickoff"
+
+        if not stage:
+            return
+        if stage in sent_keys:
+            return
+
+        templates = config.get("templates")
+        template = self._workflow_stage_template(
+            templates if isinstance(templates, dict) else {},
+            stage,
+        )
+        if not template:
+            return
+
+        message_tool = self.tools.get("message")
+        if not isinstance(message_tool, MessageTool):
+            logger.debug(
+                f"Trace {trace_id} workflow milestone skipped: MessageTool unavailable "
+                f"stage={stage}"
+            )
+            return
+
+        content = self._format_progress_template(
+            template,
+            {
+                "stage": stage,
+                "tool_calls": tool_calls,
+                "source_calls": source_calls,
+                "synthesis_calls": synthesis_calls,
+                "save_calls": save_calls,
+                "substantive_calls": substantive_count,
+                "last_tool": last_tool or "unknown",
+                "completion_satisfied": satisfied_rules,
+                "completion_total": total_rules,
+                "completion_progress": completion_progress,
+            },
+        ).strip()
+        if not content:
+            return
+
+        send_result = await message_tool.execute(
+            content=content,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+        )
+        if send_result.lower().startswith("error"):
+            logger.warning(
+                f"Trace {trace_id} workflow milestone send failed stage={stage} "
+                f"result={send_result}"
+            )
+            return
+
+        sent_keys.add(stage)
+        state["sent_count"] = sent_count + 1
+        logger.debug(
+            f"Trace {trace_id} workflow milestone sent stage={stage} "
+            f"tool_calls={tool_calls} source_calls={source_calls} "
+            f"completion={completion_progress} sent={state['sent_count']}/{max_messages or 'unlimited'}"
+        )
 
     def _schedule_memory_consolidation(self, session: Session, archive_all: bool = False) -> None:
         """
@@ -955,6 +1416,15 @@ Respond with valid JSON only."""
             skill for skill in (ctx_stats.get("matched_skills") or [])
             if isinstance(skill, str) and skill
         ]
+        workflow_policy = self.context.skills.get_workflow_policy_for_skills(matched_skills)
+        workflow_retry_limit = self._workflow_retry_limit(workflow_policy)
+        workflow_retries_used = 0
+        workflow_tool_events: list[dict[str, Any]] = []
+        workflow_progress_state: dict[str, Any] = {
+            "config": self._workflow_progress_milestones(workflow_policy),
+            "sent_count": 0,
+            "sent_keys": set(),
+        }
         force_realtime_tools = self._is_realtime_query(msg.content)
         attachment_requested = self._is_attachment_delivery_request(msg.content)
         tool_round_limited_skills = self.context.skills.get_tool_round_limited_skills(matched_skills)
@@ -976,6 +1446,16 @@ Respond with valid JSON only."""
                 f"tool_round_limited_skills={tool_round_limited_skills} "
                 f"round_limit={skill_tool_round_limit} stagnation_limit={stagnation_limit}"
             )
+        if workflow_policy:
+            logger.debug(
+                f"Trace {trace_id} workflow policy enabled for matched_skills={matched_skills} "
+                f"retry_limit={workflow_retry_limit} policy={workflow_policy}"
+            )
+            if workflow_progress_state.get("config"):
+                logger.debug(
+                    f"Trace {trace_id} workflow milestone push enabled "
+                    f"config={workflow_progress_state.get('config')}"
+                )
         logger.debug(
             f"Trace {trace_id} realtime_tool_enforcement={force_realtime_tools} "
             f"attachment_requested={attachment_requested} "
@@ -1070,6 +1550,18 @@ Respond with valid JSON only."""
                                 web_search_result_cache[args_signature] = result
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
+                        )
+                        workflow_tool_events.append({
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                            "result": result,
+                        })
+                        await self._maybe_emit_workflow_milestone(
+                            msg=msg,
+                            trace_id=trace_id,
+                            policy=workflow_policy,
+                            tool_events=workflow_tool_events,
+                            state=workflow_progress_state,
                         )
                         tool_elapsed = time.monotonic() - t_tool
                         tool_total += tool_elapsed
@@ -1203,6 +1695,18 @@ Respond with valid JSON only."""
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    workflow_tool_events.append({
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                        "result": result,
+                    })
+                    await self._maybe_emit_workflow_milestone(
+                        msg=msg,
+                        trace_id=trace_id,
+                        policy=workflow_policy,
+                        tool_events=workflow_tool_events,
+                        state=workflow_progress_state,
+                    )
                     round_signatures.append(
                         f"{tool_call.name}:{args_signature}:{self._hash_text(result)}"
                     )
@@ -1246,6 +1750,59 @@ Respond with valid JSON only."""
                         break
             else:
                 # No tool calls, we're done
+                workflow_missing = self._validate_workflow_requirements(
+                    workflow_policy,
+                    workflow_tool_events,
+                    response.content,
+                )
+                if workflow_missing:
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} workflow requirements missing={workflow_missing} "
+                        f"retry_used={workflow_retries_used}/{workflow_retry_limit}"
+                    )
+                    if workflow_retries_used < workflow_retry_limit and stream_state is None:
+                        workflow_retries_used += 1
+                        missing_lines = self._format_workflow_missing(workflow_missing)
+                        retry_prompt = (
+                            "Workflow enforcement retry: before finalizing, satisfy all missing "
+                            "requirements by calling the necessary tools.\n"
+                        )
+                        if missing_lines:
+                            retry_prompt += f"Missing requirements:\n{missing_lines}"
+                        if not native_mode:
+                            messages = self.context.add_assistant_message(
+                                messages,
+                                response.content,
+                                reasoning_content=response.reasoning_content,
+                            )
+                            messages.append(
+                                {
+                                    "role": "system",
+                                    "content": retry_prompt,
+                                }
+                            )
+                        else:
+                            messages = [
+                                {
+                                    "role": "user",
+                                    "content": retry_prompt,
+                                }
+                            ]
+                        continue
+
+                    final_content = self._apply_workflow_failure(
+                        response.content,
+                        workflow_missing,
+                        workflow_policy,
+                    )
+                    if stream_state:
+                        final_streamed = stream_state.sent_any
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} workflow failed finalization "
+                        f"content_chars={len(final_content or '')}"
+                    )
+                    break
+
                 if (
                     matched_skills
                     and not skill_enforcement_attempted
@@ -1378,8 +1935,32 @@ Respond with valid JSON only."""
                     final_streamed = True
 
             final_content = summary_response.content or ""
+            workflow_missing = self._validate_workflow_requirements(
+                workflow_policy,
+                workflow_tool_events,
+                final_content,
+            )
+            if workflow_missing:
+                final_content = self._apply_workflow_failure(
+                    final_content,
+                    workflow_missing,
+                    workflow_policy,
+                )
             if summary_response.response_id and summary_response.response_id.startswith("resp_"):
                 last_response = summary_response
+
+        if final_content is not None:
+            workflow_missing = self._validate_workflow_requirements(
+                workflow_policy,
+                workflow_tool_events,
+                final_content,
+            )
+            if workflow_missing:
+                final_content = self._apply_workflow_failure(
+                    final_content,
+                    workflow_missing,
+                    workflow_policy,
+                )
 
         # Update session with LLM context info
         if last_response is not None:

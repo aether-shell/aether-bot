@@ -1,12 +1,14 @@
 ---
 name: forget
-description: "Delete saved knowledge from memory/learnings/. Use when the user asks to forget, remove, or delete previously learned knowledge — e.g. 'forget react hooks', '删除知识'."
-metadata: {"nanobot":{"emoji":"🗑️","aliases":["delete-knowledge","remove-knowledge"],"triggers":["forget knowledge","delete knowledge","remove knowledge","忘记知识","删除知识"],"allowed_tools":["read_file","list_dir","exec"]}}
+description: "Delete saved knowledge from memory/learnings/. Use when the user asks to forget, remove, clear, or delete previously learned knowledge — e.g. 'forget react hooks', '把学到的知识删掉'."
+metadata: {"nanobot":{"emoji":"🗑️","aliases":["delete-knowledge","remove-knowledge"],"triggers":["forget knowledge","delete knowledge","remove knowledge","forget","delete learned","remove learned","remove from knowledge base","delete from memory","忘记知识","删除知识","删掉知识","删掉","删除","清空知识","把学到的知识删掉","忘了这个","别记了","从知识库删掉"],"allowed_tools":["read_file","list_dir","exec"]}}
 ---
 
 # Forget
 
 Delete knowledge files from `memory/learnings/`.
+
+Path rule: always use workspace-relative `memory/learnings/...` paths in tool calls.
 
 ## Workflow
 

@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Two-layer memory system with grep-based recall.
+description: Two-layer memory system with grep-based recall. Use when storing durable preferences/context or searching long-term history.
 metadata: {"nanobot":{"emoji":"🧠","aliases":["remember","memory-store"],"triggers":["memory","remember","history","long-term memory","记忆","记住","历史记录","长期记忆"],"allowed_tools":["read_file","write_file","edit_file","exec"]}}
 always: true
 ---
