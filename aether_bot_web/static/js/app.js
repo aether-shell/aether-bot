@@ -20,6 +20,10 @@
     let catchUpScheduled = false;
     // Flag: set while loadSessionsAndHistory is running to suppress catch-up
     let initialLoadInProgress = false;
+    // Periodic fallback poll timer — ensures messages appear even when SSE is dead
+    let fallbackPollTimer = null;
+    // Track whether we're waiting for an assistant reply (user sent, no reply yet)
+    let awaitingReply = false;
 
     // === DOM ===
     const loginView = document.getElementById('login-view');
@@ -326,6 +330,32 @@
         setTimeout(function () { catchUpMessages(); }, 700);
         setTimeout(function () { catchUpMessages(); }, 2200);
         setTimeout(function () { catchUpMessages(); }, 5000);
+        setTimeout(function () { catchUpMessages(); }, 8000);
+        setTimeout(function () { catchUpMessages(); }, 12000);
+    }
+
+    // Periodic fallback poll: when SSE is dead and we're awaiting a reply,
+    // poll every 3s until the reply arrives (or 60s max).
+    function startFallbackPoll() {
+        stopFallbackPoll();
+        awaitingReply = true;
+        var attempts = 0;
+        fallbackPollTimer = setInterval(function () {
+            attempts++;
+            if (!awaitingReply || attempts > 20) {
+                stopFallbackPoll();
+                return;
+            }
+            catchUpMessages();
+        }, 3000);
+    }
+
+    function stopFallbackPoll() {
+        awaitingReply = false;
+        if (fallbackPollTimer) {
+            clearInterval(fallbackPollTimer);
+            fallbackPollTimer = null;
+        }
     }
 
     // === Visibility change: reconnect SSE + catch up missed messages ===
@@ -377,6 +407,8 @@
             // means the user just sent a message that the agent hasn't
             // persisted yet — don't wipe those pending messages.
             if (serverMsgs.length > existingCount) {
+                // Reply found via polling — stop fallback
+                stopFallbackPoll();
                 // Remove all non-streaming messages and re-render from server
                 Array.from(existingEls).forEach(function (el) { el.remove(); });
                 serverMsgs.forEach(function (m) {
@@ -429,6 +461,9 @@
             loadSessions();
             return;
         }
+
+        // Assistant reply received via SSE — stop fallback polling
+        stopFallbackPoll();
 
         const sid = data.stream_id;
         var msgEl;
@@ -675,6 +710,7 @@
                         connectSSE();
                     }
                     schedulePostSendCatchup();
+                    startFallbackPoll();
                 } else {
                     // Server error — retry
                     attempt++;
@@ -1142,12 +1178,15 @@
         if (allSessions) renderSessions(allSessions);
     }
 
+    var _creatingSession = false;
+
     async function createNewSession() {
+        if (_creatingSession) return;
+        _creatingSession = true;
         try {
             const res = await fetch(API + '/api/sessions/new', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + token
                 }
             });
@@ -1169,7 +1208,11 @@
                 closeSidebar();
                 loadSessions();
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+            console.warn('[session] createNewSession failed', e);
+        } finally {
+            _creatingSession = false;
+        }
     }
 
     newChatBtn.addEventListener('click', createNewSession);
