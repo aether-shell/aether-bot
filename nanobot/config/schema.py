@@ -249,7 +249,19 @@ class GatewayConfig(BaseModel):
 
 class WebSearchConfig(BaseModel):
     """Web search tool configuration."""
-    api_key: str = ""  # Brave Search API key
+    # Backward-compatible key for Brave; prefer brave_api_key for clarity.
+    api_key: str = ""
+    provider: str = "auto"  # auto | openai_hosted | bing_news_jina | hn_algolia | brave | tavily | searxng
+    fallback_providers: list[str] = Field(default_factory=list)
+    brave_api_key: str = ""
+    tavily_api_key: str = ""
+    searxng_base_url: str = ""  # e.g. https://searx.example.com
+    openai_api_key: str = ""
+    openai_api_base: str = ""  # e.g. https://api.openai.com/v1
+    openai_model: str = "gpt-4.1-mini"
+    openai_proxy: str = ""
+    openai_headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: float = 10.0
     max_results: int = 5
 
 

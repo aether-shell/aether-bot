@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+from nanobot.cli.commands import _build_web_search_config, app
+from nanobot.config.schema import Config
 
 runner = CliRunner()
 
@@ -132,3 +133,24 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     # But SHOULD create them (since _create_workspace_templates is called unconditionally)
     assert "Created AGENTS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+
+
+def test_build_web_search_config_adds_openai_resilience_fallbacks() -> None:
+    config = Config()
+    config.tools.web.search.provider = "openai_hosted"
+    config.tools.web.search.fallback_providers = []
+
+    search_cfg = _build_web_search_config(config)
+
+    assert search_cfg.fallback_providers == ["bing_news_jina", "hn_algolia"]
+
+
+def test_build_web_search_config_prefers_active_openai_model() -> None:
+    config = Config()
+    config.agents.defaults.model = "gpt-5.3-codex"
+    config.providers.openai.api_key = "sk-test"
+    config.tools.web.search.openai_model = "gpt-4.1-mini"
+
+    search_cfg = _build_web_search_config(config)
+
+    assert search_cfg.openai_model == "gpt-5.3-codex"

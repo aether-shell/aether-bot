@@ -444,6 +444,41 @@ def _make_provider(config):
     )
 
 
+def _build_web_search_config(config):
+    """Build effective web-search config with provider fallbacks."""
+    search_cfg = config.tools.web.search.model_copy(deep=True)
+
+    # Backward compatibility: api_key was historically Brave key.
+    if not search_cfg.brave_api_key and search_cfg.api_key:
+        search_cfg.brave_api_key = search_cfg.api_key
+
+    # Convenience: reuse OpenAI provider credentials unless overridden.
+    if not search_cfg.openai_api_key and config.providers.openai.api_key:
+        search_cfg.openai_api_key = config.providers.openai.api_key
+    if not search_cfg.openai_api_base and config.providers.openai.api_base:
+        search_cfg.openai_api_base = config.providers.openai.api_base
+    if not search_cfg.openai_proxy and config.providers.openai.proxy:
+        search_cfg.openai_proxy = config.providers.openai.proxy
+    if not search_cfg.openai_headers:
+        provider_headers = config.providers.openai.extra_headers or config.providers.openai.headers
+        if provider_headers:
+            search_cfg.openai_headers = dict(provider_headers)
+
+    # Prefer the active OpenAI model over legacy default when search model
+    # wasn't explicitly customized.
+    if search_cfg.openai_model in {"", "gpt-4.1-mini"}:
+        active_model = config.agents.defaults.model
+        if active_model and config.get_provider_name(active_model) == "openai":
+            search_cfg.openai_model = active_model
+
+    # Resilience default: when pinned to OpenAI-hosted search without explicit
+    # fallback list, add no-key fallback providers to avoid hard failures on 5xx.
+    if search_cfg.provider == "openai_hosted" and not search_cfg.fallback_providers:
+        search_cfg.fallback_providers = ["bing_news_jina", "hn_algolia"]
+
+    return search_cfg
+
+
 def _format_context_status(meta: dict | None) -> str | None:
     if not meta or not isinstance(meta, dict):
         return None
@@ -509,6 +544,7 @@ def gateway(
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
+    web_search_config = _build_web_search_config(config)
     session_manager = SessionManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
@@ -524,7 +560,8 @@ def gateway(
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
-        brave_api_key=config.tools.web.search.api_key or None,
+        brave_api_key=web_search_config.brave_api_key or web_search_config.api_key or None,
+        web_search_config=web_search_config,
         exec_config=config.tools.exec,
         cron_service=cron,
         stream=config.agents.defaults.stream,
@@ -622,6 +659,7 @@ def agent(
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
+    web_search_config = _build_web_search_config(config)
 
 
     configure_logging(force=True)
@@ -639,7 +677,8 @@ def agent(
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
-        brave_api_key=config.tools.web.search.api_key or None,
+        brave_api_key=web_search_config.brave_api_key or web_search_config.api_key or None,
+        web_search_config=web_search_config,
         exec_config=config.tools.exec,
         stream=config.agents.defaults.stream,
         stream_min_chars=config.agents.defaults.stream_min_chars,

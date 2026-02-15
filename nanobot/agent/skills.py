@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -263,6 +264,142 @@ class SkillsLoader:
 
         return selected
 
+    def get_workflow_policy_for_skills(self, skill_names: list[str]) -> dict[str, Any]:
+        """
+        Merge workflow enforcement metadata for matched skills.
+
+        Reads `metadata.nanobot.workflow` from each skill and returns a merged
+        policy dict for loop-level generic validation.
+        """
+        merged: dict[str, Any] = {
+            "kickoff": {
+                "require_substantive_action": False,
+                "substantive_tools": [],
+                "forbid_as_first_only": [],
+            },
+            "completion": {
+                "require_tool_calls": [],
+            },
+            "retry": {
+                "enforcement_retries": 0,
+                "failure_mode": "explain_missing",
+            },
+            "progress": {
+                "claim_requires_actions": False,
+                "claim_patterns": [],
+                "milestones": {
+                    "enabled": False,
+                    "tool_call_interval": 0,
+                    "max_messages": 0,
+                    "templates": {},
+                },
+            },
+        }
+
+        seen_substantive: set[str] = set()
+        seen_forbid_first: set[str] = set()
+        seen_claim_patterns: set[str] = set()
+        seen_rules: set[str] = set()
+
+        for name in skill_names:
+            meta = self._get_skill_meta(name)
+            workflow = meta.get("workflow")
+            if not isinstance(workflow, dict):
+                continue
+
+            kickoff = workflow.get("kickoff")
+            if isinstance(kickoff, dict):
+                if bool(kickoff.get("require_substantive_action")):
+                    merged["kickoff"]["require_substantive_action"] = True
+
+                for tool_name in self._normalize_meta_list(kickoff.get("substantive_tools")):
+                    if tool_name in seen_substantive:
+                        continue
+                    seen_substantive.add(tool_name)
+                    merged["kickoff"]["substantive_tools"].append(tool_name)
+
+                for tool_name in self._normalize_meta_list(kickoff.get("forbid_as_first_only")):
+                    if tool_name in seen_forbid_first:
+                        continue
+                    seen_forbid_first.add(tool_name)
+                    merged["kickoff"]["forbid_as_first_only"].append(tool_name)
+
+            completion = workflow.get("completion")
+            if isinstance(completion, dict):
+                raw_rules = completion.get("require_tool_calls")
+                if isinstance(raw_rules, list):
+                    for raw_rule in raw_rules:
+                        normalized_rule = self._normalize_workflow_tool_rule(raw_rule)
+                        if not normalized_rule:
+                            continue
+                        signature = json.dumps(normalized_rule, ensure_ascii=False, sort_keys=True)
+                        if signature in seen_rules:
+                            continue
+                        seen_rules.add(signature)
+                        merged["completion"]["require_tool_calls"].append(normalized_rule)
+
+            retry = workflow.get("retry")
+            if isinstance(retry, dict):
+                retries_raw = retry.get("enforcement_retries")
+                try:
+                    retries = int(retries_raw)
+                except (TypeError, ValueError):
+                    retries = 0
+                if retries > merged["retry"]["enforcement_retries"]:
+                    merged["retry"]["enforcement_retries"] = retries
+
+                failure_mode = str(retry.get("failure_mode") or "").strip().lower()
+                if failure_mode in {"explain_missing", "hard_fail"}:
+                    if failure_mode == "hard_fail":
+                        merged["retry"]["failure_mode"] = "hard_fail"
+                    elif merged["retry"]["failure_mode"] != "hard_fail":
+                        merged["retry"]["failure_mode"] = "explain_missing"
+
+            progress = workflow.get("progress")
+            if isinstance(progress, dict):
+                if bool(progress.get("claim_requires_actions")):
+                    merged["progress"]["claim_requires_actions"] = True
+                for pattern in self._normalize_meta_list(progress.get("claim_patterns")):
+                    if pattern in seen_claim_patterns:
+                        continue
+                    seen_claim_patterns.add(pattern)
+                    merged["progress"]["claim_patterns"].append(pattern)
+                milestone_cfg = self._normalize_workflow_progress_milestones(progress.get("milestones"))
+                if milestone_cfg:
+                    merged_milestones = merged["progress"]["milestones"]
+                    if milestone_cfg.get("enabled"):
+                        merged_milestones["enabled"] = True
+
+                    interval = int(milestone_cfg.get("tool_call_interval") or 0)
+                    if interval > 0 and (
+                        int(merged_milestones.get("tool_call_interval") or 0) <= 0
+                        or interval > int(merged_milestones.get("tool_call_interval") or 0)
+                    ):
+                        merged_milestones["tool_call_interval"] = interval
+
+                    max_messages = int(milestone_cfg.get("max_messages") or 0)
+                    if max_messages > int(merged_milestones.get("max_messages") or 0):
+                        merged_milestones["max_messages"] = max_messages
+
+                    merged_templates = merged_milestones.get("templates")
+                    if not isinstance(merged_templates, dict):
+                        merged_templates = {}
+                        merged_milestones["templates"] = merged_templates
+                    for key, value in milestone_cfg.get("templates", {}).items():
+                        if key in merged_templates:
+                            continue
+                        merged_templates[key] = value
+
+        has_requirements = (
+            bool(merged["kickoff"]["require_substantive_action"])
+            or bool(merged["completion"]["require_tool_calls"])
+            or bool(merged["progress"]["claim_requires_actions"])
+            or bool(merged["progress"]["milestones"].get("enabled"))
+        )
+        if not has_requirements:
+            return {}
+        return merged
+
     def _is_explicit_skill_mention(self, message_lower: str, skill_name_lower: str) -> bool:
         """Check whether the message explicitly names a skill."""
         if f"${skill_name_lower}" in message_lower:
@@ -312,6 +449,71 @@ class SkillsLoader:
             text = str(item).strip().lower()
             if text:
                 normalized.append(text)
+        return normalized
+
+    def _normalize_workflow_tool_rule(self, value: object) -> dict[str, Any] | None:
+        """Normalize workflow completion tool-rule metadata."""
+        if not isinstance(value, dict):
+            return None
+
+        name = str(value.get("name") or "").strip().lower()
+        if not name:
+            return None
+
+        args = value.get("args")
+        normalized_args: dict[str, str] = {}
+        if isinstance(args, dict):
+            for key, matcher in args.items():
+                arg_key = str(key).strip()
+                if not arg_key:
+                    continue
+                normalized_args[arg_key] = str(matcher)
+
+        normalized: dict[str, Any] = {"name": name}
+        if normalized_args:
+            normalized["args"] = normalized_args
+        return normalized
+
+    def _normalize_workflow_progress_milestones(self, value: object) -> dict[str, Any]:
+        """Normalize workflow progress milestone metadata."""
+        if not isinstance(value, dict):
+            return {}
+
+        normalized: dict[str, Any] = {
+            "enabled": bool(value.get("enabled")),
+            "tool_call_interval": 0,
+            "max_messages": 0,
+            "templates": {},
+        }
+
+        try:
+            interval = int(value.get("tool_call_interval") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        if interval > 0:
+            normalized["tool_call_interval"] = interval
+
+        try:
+            max_messages = int(value.get("max_messages") or 0)
+        except (TypeError, ValueError):
+            max_messages = 0
+        if max_messages > 0:
+            normalized["max_messages"] = max_messages
+
+        templates = value.get("templates")
+        if isinstance(templates, dict):
+            normalized_templates: dict[str, str] = {}
+            for key, template in templates.items():
+                template_key = str(key).strip().lower()
+                if not template_key:
+                    continue
+                template_text = str(template).strip()
+                if not template_text:
+                    continue
+                normalized_templates[template_key] = template_text
+            if normalized_templates:
+                normalized["templates"] = normalized_templates
+
         return normalized
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:

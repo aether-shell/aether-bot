@@ -6,19 +6,22 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ContextConfig, ExecToolConfig
+    from nanobot.config.schema import ContextConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
     ExecToolConfigT = ExecToolConfig
     ContextConfigT = ContextConfig
+    WebSearchConfigT = WebSearchConfig
 else:
     ExecToolConfigT = Any
     ContextConfigT = Any
+    WebSearchConfigT = Any
 
 from loguru import logger
 
@@ -38,6 +41,56 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+
+_REALTIME_QUERY_HINTS = re.compile(
+    (
+        r"(今天|今日|最新|刚刚|实时|新闻|头条|突发|当下|现在|目前|"
+        r"搜索|查一下|查一查|查查|链接|来源|source|sources?|"
+        r"today|latest|breaking|news|headline|current|now|live|price|quote|score|schedule)"
+    ),
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_REQUEST_HINTS = re.compile(
+    (
+        r"(作为文件|发文件|发送文件|附件|把.*文件发给我|发给我.*文件|上传文件|"
+        r"send (?:me )?(?:the )?(?:file|document)|"
+        r"(?:send|share) .* as (?:a )?(?:file|attachment)|"
+        r"attachment|attach(?:ed|ment)?)"
+    ),
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_SENT_CLAIMS = re.compile(
+    r"(已发|已发送|发你了|附件就是|sent|attached|uploaded)",
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_ACK_HINTS = re.compile(
+    r"(查收|已发|已发送|发你了|sent|attached|uploaded)",
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_FILE_TOKEN = re.compile(
+    (
+        r"(?<![\w/.-])"
+        r"([A-Za-z0-9_./-]+\.(?:md|txt|pdf|docx?|csv|xlsx?|xls|zip|json|png|jpe?g|gif|webp))"
+        r"(?![\w/.-])"
+    ),
+    re.IGNORECASE,
+)
+
+_TRANSIENT_MEMORY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b[A-Z][A-Z0-9_]*_API_KEY\b.*\bnot configured\b", re.IGNORECASE),
+    re.compile(r"\bBRAVE_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bTAVILY_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bSEARXNG_BASE_URL\b", re.IGNORECASE),
+    re.compile(r"\bOPENAI_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bnot configured\b", re.IGNORECASE),
+    re.compile(r"\bcannot (?:access|reach) internet\b", re.IGNORECASE),
+    re.compile(r"\bnetwork (?:error|timeout|unavailable)\b", re.IGNORECASE),
+    re.compile(r"\bweb_search failed\b", re.IGNORECASE),
+)
 
 
 class _StreamState:
@@ -111,6 +164,7 @@ class AgentLoop:
         max_tokens: int = 4096,
         memory_window: int = 50,
         brave_api_key: str | None = None,
+        web_search_config: WebSearchConfigT | None = None,
         exec_config: ExecToolConfigT | None = None,
         cron_service: "CronService" | None = None,
         stream: bool = False,
@@ -130,6 +184,7 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
+        self.web_search_config = web_search_config
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.stream = stream
@@ -156,6 +211,7 @@ class AgentLoop:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
+            web_search_config=web_search_config,
             exec_config=self.exec_config,
             restrict_to_workspace=self.restrict_to_workspace,
         )
@@ -167,10 +223,10 @@ class AgentLoop:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
-        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
+        self.tools.register(ReadFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir, base_dir=self.workspace))
+        self.tools.register(ListDirTool(allowed_dir=allowed_dir, base_dir=self.workspace))
 
         # Shell tool
         self.tools.register(ExecTool(
@@ -180,7 +236,12 @@ class AgentLoop:
         ))
 
         # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+        self.tools.register(
+            WebSearchTool.from_config(
+                self.web_search_config,
+                legacy_brave_api_key=self.brave_api_key,
+            )
+        )
         self.tools.register(WebFetchTool())
 
         # Claude tool (Claude Code runner wrapper)
@@ -280,9 +341,630 @@ class AgentLoop:
         return False
 
     @staticmethod
+    def _is_realtime_query(message: str) -> bool:
+        """Heuristic: whether the prompt likely needs live verification."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_REALTIME_QUERY_HINTS.search(text))
+
+    @staticmethod
+    def _is_attachment_delivery_request(message: str) -> bool:
+        """Heuristic: whether the user is asking to deliver a real file attachment."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_ATTACHMENT_REQUEST_HINTS.search(text))
+
+    @staticmethod
+    def _claims_attachment_sent(message: str) -> bool:
+        """Heuristic: whether assistant text claims a file was already sent."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_ATTACHMENT_SENT_CLAIMS.search(text))
+
+    @staticmethod
+    def _is_redundant_attachment_ack(message: str) -> bool:
+        """Whether a short follow-up message is only a duplicate attachment ack."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        if len(text) > 80:
+            return False
+        if not AgentLoop._claims_attachment_sent(text):
+            return False
+        if _ATTACHMENT_FILE_TOKEN.search(text):
+            return False
+        return bool(_ATTACHMENT_ACK_HINTS.search(text))
+
+    @staticmethod
+    def _extract_attachment_candidates(*texts: str) -> list[str]:
+        """Extract likely file/path tokens from free text."""
+        candidates: list[str] = []
+        for text in texts:
+            value = str(text or "")
+            if not value:
+                continue
+
+            # Quoted/backticked segments often contain exact paths.
+            for pattern in (r"`([^`]+)`", r'"([^"]+)"', r"'([^']+)'"):
+                for match in re.finditer(pattern, value):
+                    token = (match.group(1) or "").strip()
+                    if token:
+                        candidates.append(token)
+
+            # Bare file-like tokens.
+            for match in _ATTACHMENT_FILE_TOKEN.finditer(value):
+                token = (match.group(1) or "").strip()
+                if token:
+                    candidates.append(token)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            key = item.strip()
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        return deduped
+
+    def _resolve_attachment_candidate(self, candidate: str) -> str | None:
+        """Resolve a candidate file token to an existing local file path."""
+        raw = (candidate or "").strip().strip("`'\"").strip()
+        if not raw:
+            return None
+
+        token_path = Path(raw).expanduser()
+        checks: list[Path] = []
+        if token_path.is_absolute():
+            checks.append(token_path)
+        else:
+            checks.append((self.workspace / token_path).resolve())
+            checks.append((self.workspace / "memory" / "learnings" / token_path.name).resolve())
+            checks.append((self.workspace / "memory" / token_path.name).resolve())
+            checks.append((self.workspace / token_path.name).resolve())
+
+        for path in checks:
+            try:
+                if path.exists() and path.is_file():
+                    return str(path)
+            except OSError:
+                continue
+        return None
+
+    def _infer_attachment_media_paths(
+        self,
+        user_content: str,
+        assistant_content: str,
+        max_items: int = 3,
+    ) -> list[str]:
+        """Infer existing local file paths from user/assistant text."""
+        resolved: list[str] = []
+        for candidate in self._extract_attachment_candidates(user_content, assistant_content):
+            path_str = self._resolve_attachment_candidate(candidate)
+            if not path_str:
+                continue
+            if path_str in resolved:
+                continue
+            resolved.append(path_str)
+            if len(resolved) >= max_items:
+                break
+        return resolved
+
+    @staticmethod
+    def _contains_transient_memory_issue(text: str) -> bool:
+        value = (text or "").strip()
+        if not value:
+            return False
+        return any(pattern.search(value) for pattern in _TRANSIENT_MEMORY_PATTERNS)
+
+    def _sanitize_history_entry(self, entry: str) -> str:
+        """
+        Remove transient environment failures from history summaries.
+
+        Keeps stable user intent/preferences while dropping volatile runtime errors.
+        """
+        text = (entry or "").strip()
+        if not text:
+            return ""
+        parts = [
+            segment.strip()
+            for segment in re.split(r"(?<=[。！？.!?])\s+", text)
+            if segment.strip()
+        ]
+        kept = [segment for segment in parts if not self._contains_transient_memory_issue(segment)]
+        return " ".join(kept).strip()
+
+    def _sanitize_memory_update(self, memory_update: str) -> str:
+        """Drop volatile environment diagnostics from MEMORY.md updates."""
+        text = (memory_update or "").strip()
+        if not text:
+            return ""
+        kept_lines: list[str] = []
+        for line in text.splitlines():
+            if self._contains_transient_memory_issue(line):
+                continue
+            kept_lines.append(line)
+        cleaned = "\n".join(kept_lines).strip()
+        return cleaned
+
+    @staticmethod
     def _hash_text(value: str) -> str:
         """Return a short stable hash for potentially large text blobs."""
         return hashlib.sha1((value or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    @staticmethod
+    def _canonical_tool_arguments(arguments: Any) -> str:
+        """Return a stable, comparable representation for tool arguments."""
+        try:
+            return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(arguments)
+
+    @staticmethod
+    def _workflow_retry_limit(policy: dict[str, Any]) -> int:
+        """Return retry count from merged workflow policy."""
+        retry_cfg = policy.get("retry") if isinstance(policy, dict) else None
+        if not isinstance(retry_cfg, dict):
+            return 0
+        try:
+            return max(0, int(retry_cfg.get("enforcement_retries") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _workflow_failure_mode(policy: dict[str, Any]) -> str:
+        retry_cfg = policy.get("retry") if isinstance(policy, dict) else None
+        if not isinstance(retry_cfg, dict):
+            return "explain_missing"
+        mode = str(retry_cfg.get("failure_mode") or "explain_missing").strip().lower()
+        return mode if mode in {"explain_missing", "hard_fail"} else "explain_missing"
+
+    @staticmethod
+    def _workflow_rule_matches_event(rule: dict[str, Any], event: dict[str, Any]) -> bool:
+        """Return True when a tool event satisfies one workflow rule."""
+        if not isinstance(rule, dict) or not isinstance(event, dict):
+            return False
+        rule_name = str(rule.get("name") or "").strip().lower()
+        event_name = str(event.get("name") or "").strip().lower()
+        if not rule_name or rule_name != event_name:
+            return False
+
+        args_matchers = rule.get("args")
+        if not isinstance(args_matchers, dict) or not args_matchers:
+            return True
+
+        event_args = event.get("arguments")
+        if not isinstance(event_args, dict):
+            return False
+
+        for matcher_key, matcher_value in args_matchers.items():
+            matcher_key_text = str(matcher_key).strip()
+            if not matcher_key_text:
+                continue
+            matcher_text = str(matcher_value or "")
+
+            if matcher_key_text.endswith("_regex"):
+                arg_name = matcher_key_text[:-6]
+                candidate = str(event_args.get(arg_name, ""))
+                try:
+                    if not re.search(matcher_text, candidate):
+                        return False
+                except re.error:
+                    return False
+            else:
+                candidate = event_args.get(matcher_key_text)
+                if str(candidate) != matcher_text:
+                    return False
+        return True
+
+    @staticmethod
+    def _workflow_tool_rule_label(rule: dict[str, Any]) -> str:
+        """Render a compact human-readable workflow rule summary."""
+        if not isinstance(rule, dict):
+            return "invalid_tool_rule"
+        name = str(rule.get("name") or "unknown")
+        args = rule.get("args")
+        if not isinstance(args, dict) or not args:
+            return f"{name}()"
+        parts: list[str] = []
+        for key, value in args.items():
+            parts.append(f"{key}={value}")
+        return f"{name}({', '.join(parts)})"
+
+    def _validate_workflow_requirements(
+        self,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+        draft_content: str | None,
+    ) -> list[str]:
+        """
+        Validate workflow requirements against current tool events and draft output.
+        Returns missing requirement messages (empty means pass).
+        """
+        if not policy:
+            return []
+
+        missing: list[str] = []
+
+        kickoff = policy.get("kickoff")
+        if isinstance(kickoff, dict):
+            require_substantive = bool(kickoff.get("require_substantive_action"))
+            substantive_tools = [
+                str(name).strip().lower()
+                for name in kickoff.get("substantive_tools", [])
+                if str(name).strip()
+            ]
+            forbid_first = {
+                str(name).strip().lower()
+                for name in kickoff.get("forbid_as_first_only", [])
+                if str(name).strip()
+            }
+
+            first_tool_name = ""
+            if tool_events:
+                first_tool_name = str(tool_events[0].get("name") or "").strip().lower()
+
+            substantive_seen = False
+            if substantive_tools:
+                substantive_seen = any(
+                    str(event.get("name") or "").strip().lower() in substantive_tools
+                    for event in tool_events
+                )
+            elif tool_events:
+                substantive_seen = True
+
+            if require_substantive and not substantive_seen:
+                if substantive_tools:
+                    missing.append(
+                        "missing substantive tool action from: "
+                        + ", ".join(sorted(set(substantive_tools)))
+                    )
+                else:
+                    missing.append("missing substantive tool action")
+
+            if require_substantive and first_tool_name and first_tool_name in forbid_first:
+                missing.append(f"first tool call `{first_tool_name}` is disallowed for kickoff")
+
+        completion = policy.get("completion")
+        if isinstance(completion, dict):
+            raw_rules = completion.get("require_tool_calls")
+            if isinstance(raw_rules, list):
+                for raw_rule in raw_rules:
+                    if not isinstance(raw_rule, dict):
+                        continue
+                    matched = any(
+                        self._workflow_rule_matches_event(raw_rule, event)
+                        for event in tool_events
+                    )
+                    if not matched:
+                        missing.append(
+                            "required tool call not satisfied: "
+                            + self._workflow_tool_rule_label(raw_rule)
+                        )
+
+        progress = policy.get("progress")
+        if isinstance(progress, dict) and bool(progress.get("claim_requires_actions")):
+            claim_patterns = [
+                str(p).strip()
+                for p in progress.get("claim_patterns", [])
+                if str(p).strip()
+            ]
+            text = str(draft_content or "")
+            claim_found = False
+            if claim_patterns and text:
+                lowered = text.lower()
+                claim_found = any(pattern.lower() in lowered for pattern in claim_patterns)
+            elif text:
+                claim_found = True
+
+            if claim_found:
+                substantive_tools = [
+                    str(name).strip().lower()
+                    for name in (policy.get("kickoff", {}) or {}).get("substantive_tools", [])
+                    if str(name).strip()
+                ]
+                if substantive_tools:
+                    substantive_seen = any(
+                        str(event.get("name") or "").strip().lower() in substantive_tools
+                        for event in tool_events
+                    )
+                else:
+                    substantive_seen = bool(tool_events)
+                if not substantive_seen:
+                    missing.append("progress/completion claim present without substantive actions")
+
+        return missing
+
+    @staticmethod
+    def _format_workflow_missing(missing: list[str]) -> str:
+        if not missing:
+            return ""
+        lines = "\n".join(f"- {item}" for item in missing)
+        return lines
+
+    def _apply_workflow_failure(
+        self,
+        content: str | None,
+        missing: list[str],
+        policy: dict[str, Any],
+    ) -> str:
+        """Return a user-visible message when workflow requirements are unmet."""
+        details = self._format_workflow_missing(missing)
+        mode = self._workflow_failure_mode(policy)
+        if mode == "hard_fail":
+            if details:
+                return (
+                    "Workflow requirements were not satisfied. This task is not complete.\n"
+                    f"{details}"
+                )
+            return "Workflow requirements were not satisfied. This task is not complete."
+
+        base = (content or "").strip()
+        warning_header = "Workflow requirements not yet satisfied:"
+        if warning_header in base:
+            return base
+        if details:
+            if base:
+                return f"{base}\n\n{warning_header}\n{details}"
+            return f"{warning_header}\n{details}"
+        if base:
+            return f"{base}\n\n{warning_header}"
+        return warning_header
+
+    @staticmethod
+    def _workflow_substantive_tools(policy: dict[str, Any]) -> set[str]:
+        kickoff = policy.get("kickoff") if isinstance(policy, dict) else None
+        if not isinstance(kickoff, dict):
+            return set()
+        return {
+            str(name).strip().lower()
+            for name in kickoff.get("substantive_tools", [])
+            if str(name).strip()
+        }
+
+    def _workflow_completion_rules(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
+        completion = policy.get("completion") if isinstance(policy, dict) else None
+        if not isinstance(completion, dict):
+            return []
+        raw_rules = completion.get("require_tool_calls")
+        if not isinstance(raw_rules, list):
+            return []
+        return [rule for rule in raw_rules if isinstance(rule, dict)]
+
+    def _workflow_completion_progress(
+        self,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+    ) -> tuple[int, int]:
+        rules = self._workflow_completion_rules(policy)
+        if not rules:
+            return 0, 0
+        satisfied = 0
+        for rule in rules:
+            if any(self._workflow_rule_matches_event(rule, event) for event in tool_events):
+                satisfied += 1
+        return satisfied, len(rules)
+
+    @staticmethod
+    def _workflow_progress_milestones(policy: dict[str, Any]) -> dict[str, Any]:
+        progress = policy.get("progress") if isinstance(policy, dict) else None
+        if not isinstance(progress, dict):
+            return {}
+        raw_milestones = progress.get("milestones")
+        if not isinstance(raw_milestones, dict):
+            return {}
+        if not bool(raw_milestones.get("enabled")):
+            return {}
+
+        try:
+            interval = int(raw_milestones.get("tool_call_interval") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        interval = max(0, interval)
+
+        try:
+            max_messages = int(raw_milestones.get("max_messages") or 3)
+        except (TypeError, ValueError):
+            max_messages = 3
+        max_messages = max(1, max_messages)
+
+        default_templates = {
+            "kickoff": (
+                "进度：已开始执行，正在检索权威资料。"
+            ),
+            "researching": (
+                "进度：资料检索中，已获取 {source_calls} 个来源。"
+            ),
+            "synthesizing": (
+                "进度：正在整理关键信息并归纳结论。"
+            ),
+            "saving": (
+                "进度：正在写入知识库文档。"
+            ),
+            "completion_ready": (
+                "进度：文档已保存，正在生成最终答复。"
+            ),
+        }
+        templates: dict[str, str] = {}
+        raw_templates = raw_milestones.get("templates")
+        for key, default_text in default_templates.items():
+            custom = ""
+            if isinstance(raw_templates, dict):
+                custom = str(raw_templates.get(key) or "").strip()
+            templates[key] = custom or default_text
+
+        return {
+            "enabled": True,
+            "tool_call_interval": interval,
+            "max_messages": max_messages,
+            "templates": templates,
+        }
+
+    @staticmethod
+    def _workflow_stage_template(
+        templates: dict[str, Any],
+        stage: str,
+    ) -> str:
+        if not isinstance(templates, dict):
+            return ""
+        aliases: dict[str, list[str]] = {
+            "kickoff": ["kickoff"],
+            # Backward compatible alias for older metadata.
+            "researching": ["researching", "tool_progress"],
+            "synthesizing": ["synthesizing"],
+            "saving": ["saving"],
+            "completion_ready": ["completion_ready"],
+        }
+        keys = aliases.get(stage, [stage])
+        for key in keys:
+            value = str(templates.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _format_progress_template(template: str, values: dict[str, Any]) -> str:
+        class _SafeDict(dict[str, Any]):
+            def __missing__(self, key: str) -> str:
+                return "{" + key + "}"
+
+        return template.format_map(_SafeDict(values))
+
+    async def _maybe_emit_workflow_milestone(
+        self,
+        msg: InboundMessage,
+        trace_id: str,
+        policy: dict[str, Any],
+        tool_events: list[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> None:
+        config = state.get("config")
+        if not isinstance(config, dict) or not config:
+            return
+        if not tool_events:
+            return
+
+        sent_count = int(state.get("sent_count") or 0)
+        max_messages = int(config.get("max_messages") or 0)
+        if max_messages > 0 and sent_count >= max_messages:
+            return
+
+        sent_keys = state.get("sent_keys")
+        if not isinstance(sent_keys, set):
+            sent_keys = set()
+            state["sent_keys"] = sent_keys
+
+        tool_calls = len(tool_events)
+        last_tool = str(tool_events[-1].get("name") or "").strip().lower()
+        source_tools = {"web_search", "web_fetch"}
+        source_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() in source_tools
+        )
+        synthesis_tools = {"read_file", "edit_file"}
+        synthesis_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() in synthesis_tools
+        )
+        save_calls = sum(
+            1 for event in tool_events
+            if str(event.get("name") or "").strip().lower() == "write_file"
+        )
+
+        substantive_tools = self._workflow_substantive_tools(policy)
+        substantive_count = 0
+        if substantive_tools:
+            substantive_count = sum(
+                1
+                for event in tool_events
+                if str(event.get("name") or "").strip().lower() in substantive_tools
+            )
+        else:
+            substantive_count = len(tool_events)
+        substantive_seen = substantive_count > 0
+
+        satisfied_rules, total_rules = self._workflow_completion_progress(policy, tool_events)
+        completion_ready = total_rules > 0 and satisfied_rules >= total_rules
+        completion_progress = (
+            f"{satisfied_rules}/{total_rules}" if total_rules > 0 else "n/a"
+        )
+
+        stage = ""
+
+        if completion_ready and "completion_ready" not in sent_keys:
+            stage = "completion_ready"
+        elif save_calls > 0 and "saving" not in sent_keys:
+            stage = "saving"
+        elif source_calls >= 2 and "researching" not in sent_keys:
+            stage = "researching"
+        elif source_calls > 0 and synthesis_calls > 0 and "synthesizing" not in sent_keys:
+            stage = "synthesizing"
+        elif substantive_seen and "kickoff" not in sent_keys:
+            stage = "kickoff"
+
+        if not stage:
+            return
+        if stage in sent_keys:
+            return
+
+        templates = config.get("templates")
+        template = self._workflow_stage_template(
+            templates if isinstance(templates, dict) else {},
+            stage,
+        )
+        if not template:
+            return
+
+        message_tool = self.tools.get("message")
+        if not isinstance(message_tool, MessageTool):
+            logger.debug(
+                f"Trace {trace_id} workflow milestone skipped: MessageTool unavailable "
+                f"stage={stage}"
+            )
+            return
+
+        content = self._format_progress_template(
+            template,
+            {
+                "stage": stage,
+                "tool_calls": tool_calls,
+                "source_calls": source_calls,
+                "synthesis_calls": synthesis_calls,
+                "save_calls": save_calls,
+                "substantive_calls": substantive_count,
+                "last_tool": last_tool or "unknown",
+                "completion_satisfied": satisfied_rules,
+                "completion_total": total_rules,
+                "completion_progress": completion_progress,
+            },
+        ).strip()
+        if not content:
+            return
+
+        send_result = await message_tool.execute(
+            content=content,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+        )
+        if send_result.lower().startswith("error"):
+            logger.warning(
+                f"Trace {trace_id} workflow milestone send failed stage={stage} "
+                f"result={send_result}"
+            )
+            return
+
+        sent_keys.add(stage)
+        state["sent_count"] = sent_count + 1
+        logger.debug(
+            f"Trace {trace_id} workflow milestone sent stage={stage} "
+            f"tool_calls={tool_calls} source_calls={source_calls} "
+            f"completion={completion_progress} sent={state['sent_count']}/{max_messages or 'unlimited'}"
+        )
 
     def _schedule_memory_consolidation(self, session: Session, archive_all: bool = False) -> None:
         """
@@ -409,10 +1091,24 @@ Respond with valid JSON only."""
             history_entry = str(payload.get("history_entry") or "").strip()
             memory_update = str(payload.get("memory_update") or "").strip()
 
-            if history_entry:
-                memory.append_history(history_entry)
-            if memory_update and memory_update != current_memory.strip():
-                memory.write_long_term(memory_update)
+            sanitized_history_entry = self._sanitize_history_entry(history_entry)
+            sanitized_memory_update = self._sanitize_memory_update(memory_update)
+            if not sanitized_memory_update:
+                sanitized_memory_update = current_memory.strip()
+
+            if sanitized_history_entry:
+                memory.append_history(sanitized_history_entry)
+            elif history_entry:
+                logger.debug(
+                    f"Memory consolidation dropped transient history entry key={session.key}"
+                )
+
+            if sanitized_memory_update and sanitized_memory_update != current_memory.strip():
+                memory.write_long_term(sanitized_memory_update)
+            elif memory_update and sanitized_memory_update != memory_update:
+                logger.debug(
+                    f"Memory consolidation sanitized transient memory_update key={session.key}"
+                )
 
             if not archive_all:
                 session.last_consolidated = max(0, total_messages - keep_count)
@@ -433,6 +1129,7 @@ Respond with valid JSON only."""
         self,
         matched_skills: list[str],
         has_tool_results: bool = False,
+        force_realtime_tools: bool = False,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         Select visible tools and tool-choice policy for this iteration.
@@ -442,8 +1139,23 @@ Respond with valid JSON only."""
         - Matched skills without tool results yet: enforce one tool call (tool_choice=required).
         - After at least one tool result exists: switch back to auto so the model can finalize.
         - If skills provide metadata.nanobot.allowed_tools, restrict tool set.
+        - Realtime queries without tool results: force one web tool call first.
         """
         all_tools = self.tools.get_definitions()
+        if force_realtime_tools and not has_tool_results:
+            realtime_tools = [
+                schema
+                for schema in all_tools
+                if self._tool_schema_name(schema) in {"web_search", "web_fetch"}
+            ]
+            if realtime_tools:
+                return realtime_tools, "required"
+            logger.warning(
+                "Realtime-tool enforcement active but web tools missing; "
+                "falling back to full toolset with required tool call."
+            )
+            return all_tools, ("required" if all_tools else None)
+
         if not matched_skills:
             return all_tools, ("auto" if all_tools else None)
 
@@ -704,8 +1416,21 @@ Respond with valid JSON only."""
             skill for skill in (ctx_stats.get("matched_skills") or [])
             if isinstance(skill, str) and skill
         ]
+        workflow_policy = self.context.skills.get_workflow_policy_for_skills(matched_skills)
+        workflow_retry_limit = self._workflow_retry_limit(workflow_policy)
+        workflow_retries_used = 0
+        workflow_tool_events: list[dict[str, Any]] = []
+        workflow_progress_state: dict[str, Any] = {
+            "config": self._workflow_progress_milestones(workflow_policy),
+            "sent_count": 0,
+            "sent_keys": set(),
+        }
+        force_realtime_tools = self._is_realtime_query(msg.content)
+        attachment_requested = self._is_attachment_delivery_request(msg.content)
         tool_round_limited_skills = self.context.skills.get_tool_round_limited_skills(matched_skills)
         skill_enforcement_attempted = False
+        realtime_enforcement_attempted = False
+        web_search_result_cache: dict[str, str] = {}
         raw_skill_tool_round_limit = int(getattr(self.context_config, "skill_tool_round_limit", 0) or 0)
         skill_tool_round_limit = max(0, raw_skill_tool_round_limit)
         if not tool_round_limited_skills:
@@ -721,12 +1446,29 @@ Respond with valid JSON only."""
                 f"tool_round_limited_skills={tool_round_limited_skills} "
                 f"round_limit={skill_tool_round_limit} stagnation_limit={stagnation_limit}"
             )
+        if workflow_policy:
+            logger.debug(
+                f"Trace {trace_id} workflow policy enabled for matched_skills={matched_skills} "
+                f"retry_limit={workflow_retry_limit} policy={workflow_policy}"
+            )
+            if workflow_progress_state.get("config"):
+                logger.debug(
+                    f"Trace {trace_id} workflow milestone push enabled "
+                    f"config={workflow_progress_state.get('config')}"
+                )
+        logger.debug(
+            f"Trace {trace_id} realtime_tool_enforcement={force_realtime_tools} "
+            f"attachment_requested={attachment_requested} "
+            f"matched_skills={matched_skills}"
+        )
 
         # Native session recovery: if first LLM call in native mode fails,
         # clear stale previous_response_id and retry with full context (reset mode).
         if native_mode:
             probe_tools, probe_tool_choice = self._select_iteration_tools(
-                matched_skills, has_tool_results=False
+                matched_skills,
+                has_tool_results=False,
+                force_realtime_tools=force_realtime_tools,
             )
             probe_tool_names = [
                 (tool.get("function", {}) or {}).get("name") or tool.get("name") or "unknown"
@@ -793,11 +1535,33 @@ Respond with valid JSON only."""
                     messages = []
                     for tool_call in first_response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        args_signature = self._canonical_tool_arguments(tool_call.arguments)
                         logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                         t_tool = time.monotonic()
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        if tool_call.name == "web_search" and args_signature in web_search_result_cache:
+                            result = web_search_result_cache[args_signature]
+                            logger.debug(
+                                f"Trace {trace_id} native probe tool=web_search "
+                                "dedupe_hit=True reused previous result"
+                            )
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                            if tool_call.name == "web_search":
+                                web_search_result_cache[args_signature] = result
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
+                        )
+                        workflow_tool_events.append({
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                            "result": result,
+                        })
+                        await self._maybe_emit_workflow_milestone(
+                            msg=msg,
+                            trace_id=trace_id,
+                            policy=workflow_policy,
+                            tool_events=workflow_tool_events,
+                            state=workflow_progress_state,
                         )
                         tool_elapsed = time.monotonic() - t_tool
                         tool_total += tool_elapsed
@@ -817,8 +1581,25 @@ Respond with valid JSON only."""
                             )
                             iteration = self.max_iterations
                 else:
-                    final_content = first_response.content
-                    iteration = self.max_iterations  # Skip main loop
+                    if force_realtime_tools:
+                        realtime_enforcement_attempted = True
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Realtime verification retry. Call web_search first "
+                                    "(and web_fetch if needed), then answer with links."
+                                ),
+                            }
+                        ]
+                        iteration = 1  # Count native probe call
+                        logger.debug(
+                            f"Trace {trace_id} native probe had no tool calls for realtime query; "
+                            "queued explicit realtime retry"
+                        )
+                    else:
+                        final_content = first_response.content
+                        iteration = self.max_iterations  # Skip main loop
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -832,7 +1613,9 @@ Respond with valid JSON only."""
                 on_delta = stream_state.on_delta
 
             iter_tools, iter_tool_choice = self._select_iteration_tools(
-                matched_skills, has_tool_results=self._has_tool_messages(messages)
+                matched_skills,
+                has_tool_results=self._has_tool_messages(messages),
+                force_realtime_tools=force_realtime_tools,
             )
             iter_tool_names = [
                 (tool.get("function", {}) or {}).get("name") or tool.get("name") or "unknown"
@@ -896,18 +1679,34 @@ Respond with valid JSON only."""
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    args_signature = self._canonical_tool_arguments(tool_call.arguments)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     t_tool = time.monotonic()
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if tool_call.name == "web_search" and args_signature in web_search_result_cache:
+                        result = web_search_result_cache[args_signature]
+                        logger.debug(
+                            f"Trace {trace_id} iteration={iteration} tool=web_search "
+                            "dedupe_hit=True reused previous result"
+                        )
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        if tool_call.name == "web_search":
+                            web_search_result_cache[args_signature] = result
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
-                    try:
-                        args_signature = json.dumps(
-                            tool_call.arguments, ensure_ascii=False, sort_keys=True
-                        )
-                    except Exception:
-                        args_signature = str(tool_call.arguments)
+                    workflow_tool_events.append({
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                        "result": result,
+                    })
+                    await self._maybe_emit_workflow_milestone(
+                        msg=msg,
+                        trace_id=trace_id,
+                        policy=workflow_policy,
+                        tool_events=workflow_tool_events,
+                        state=workflow_progress_state,
+                    )
                     round_signatures.append(
                         f"{tool_call.name}:{args_signature}:{self._hash_text(result)}"
                     )
@@ -951,6 +1750,59 @@ Respond with valid JSON only."""
                         break
             else:
                 # No tool calls, we're done
+                workflow_missing = self._validate_workflow_requirements(
+                    workflow_policy,
+                    workflow_tool_events,
+                    response.content,
+                )
+                if workflow_missing:
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} workflow requirements missing={workflow_missing} "
+                        f"retry_used={workflow_retries_used}/{workflow_retry_limit}"
+                    )
+                    if workflow_retries_used < workflow_retry_limit and stream_state is None:
+                        workflow_retries_used += 1
+                        missing_lines = self._format_workflow_missing(workflow_missing)
+                        retry_prompt = (
+                            "Workflow enforcement retry: before finalizing, satisfy all missing "
+                            "requirements by calling the necessary tools.\n"
+                        )
+                        if missing_lines:
+                            retry_prompt += f"Missing requirements:\n{missing_lines}"
+                        if not native_mode:
+                            messages = self.context.add_assistant_message(
+                                messages,
+                                response.content,
+                                reasoning_content=response.reasoning_content,
+                            )
+                            messages.append(
+                                {
+                                    "role": "system",
+                                    "content": retry_prompt,
+                                }
+                            )
+                        else:
+                            messages = [
+                                {
+                                    "role": "user",
+                                    "content": retry_prompt,
+                                }
+                            ]
+                        continue
+
+                    final_content = self._apply_workflow_failure(
+                        response.content,
+                        workflow_missing,
+                        workflow_policy,
+                    )
+                    if stream_state:
+                        final_streamed = stream_state.sent_any
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} workflow failed finalization "
+                        f"content_chars={len(final_content or '')}"
+                    )
+                    break
+
                 if (
                     matched_skills
                     and not skill_enforcement_attempted
@@ -988,6 +1840,46 @@ Respond with valid JSON only."""
                                     f"{', '.join(matched_skills)}. "
                                     "Before finalizing, call required tools for the matched skill workflow. "
                                     "Do not estimate real-time facts."
+                                ),
+                            }
+                        ]
+                    continue
+
+                if (
+                    force_realtime_tools
+                    and not realtime_enforcement_attempted
+                    and not self._has_tool_messages(messages)
+                    and stream_state is None
+                ):
+                    realtime_enforcement_attempted = True
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} realtime query had no tool calls; "
+                        "enforcing one retry with explicit web_search requirement"
+                    )
+                    if not native_mode:
+                        messages = self.context.add_assistant_message(
+                            messages,
+                            response.content,
+                            reasoning_content=response.reasoning_content,
+                        )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Realtime verification retry: this request needs up-to-date, "
+                                    "source-backed facts. Before finalizing your answer, call "
+                                    "web_search first (and web_fetch if needed), then answer "
+                                    "based on tool results with links."
+                                ),
+                            }
+                        )
+                    else:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Realtime verification retry. Call web_search first "
+                                    "(and web_fetch if needed), then answer with links."
                                 ),
                             }
                         ]
@@ -1043,8 +1935,32 @@ Respond with valid JSON only."""
                     final_streamed = True
 
             final_content = summary_response.content or ""
+            workflow_missing = self._validate_workflow_requirements(
+                workflow_policy,
+                workflow_tool_events,
+                final_content,
+            )
+            if workflow_missing:
+                final_content = self._apply_workflow_failure(
+                    final_content,
+                    workflow_missing,
+                    workflow_policy,
+                )
             if summary_response.response_id and summary_response.response_id.startswith("resp_"):
                 last_response = summary_response
+
+        if final_content is not None:
+            workflow_missing = self._validate_workflow_requirements(
+                workflow_policy,
+                workflow_tool_events,
+                final_content,
+            )
+            if workflow_missing:
+                final_content = self._apply_workflow_failure(
+                    final_content,
+                    workflow_missing,
+                    workflow_policy,
+                )
 
         # Update session with LLM context info
         if last_response is not None:
@@ -1066,15 +1982,57 @@ Respond with valid JSON only."""
         # Persist any messages the agent sent via the message tool (e.g. file
         # attachments) as separate assistant entries so that catchUpMessages /
         # session reload on the web frontend can re-render them.
+        delivered_media_paths: list[str] = []
+        sent_message_count = 0
         _msg_tool = self.tools.get("message")
         if isinstance(_msg_tool, MessageTool):
             for sent in _msg_tool.drain_sent_messages():
+                sent_message_count += 1
                 kwargs: dict[str, Any] = {}
-                if sent.get("media"):
-                    kwargs["media"] = sent["media"]
+                media_items = [str(p) for p in (sent.get("media") or []) if str(p).strip()]
+                if media_items:
+                    kwargs["media"] = media_items
+                    for item in media_items:
+                        if item not in delivered_media_paths:
+                            delivered_media_paths.append(item)
                 session.add_message("assistant", sent["content"], **kwargs)
-        if final_content:
-            session.add_message("assistant", final_content)
+
+        inferred_media_paths: list[str] = []
+        if attachment_requested and not delivered_media_paths:
+            inferred_media_paths = self._infer_attachment_media_paths(msg.content, final_content or "")
+            if inferred_media_paths:
+                delivered_media_paths.extend(inferred_media_paths)
+                logger.warning(
+                    f"Trace {trace_id} attachment fallback inferred media paths: "
+                    f"{[Path(p).name for p in inferred_media_paths]}"
+                )
+            elif self._claims_attachment_sent(final_content or ""):
+                final_content = (
+                    "我这次还没有真正发出附件（消息里没有携带 `media`）。"
+                    "请再给我一次文件路径，或直接确认要发送的文件名。"
+                )
+                logger.warning(
+                    f"Trace {trace_id} attachment claim detected without media; "
+                    "rewrote final response to explicit failure"
+                )
+
+        suppress_redundant_attachment_ack = (
+            attachment_requested
+            and sent_message_count > 0
+            and bool(delivered_media_paths)
+            and self._is_redundant_attachment_ack(final_content or "")
+        )
+        if suppress_redundant_attachment_ack:
+            logger.debug(
+                f"Trace {trace_id} suppressing redundant attachment follow-up "
+                f"after message tool delivery content_preview={self._preview_text(final_content or '')}"
+            )
+
+        if final_content and not suppress_redundant_attachment_ack:
+            kwargs: dict[str, Any] = {}
+            if inferred_media_paths:
+                kwargs["media"] = inferred_media_paths
+            session.add_message("assistant", final_content, **kwargs)
         self.sessions.save(session)
         save_time = time.monotonic() - t_save
         logger.debug(
@@ -1105,7 +2063,14 @@ Respond with valid JSON only."""
         else:
             logger.debug(log_line)
 
-        if final_streamed:
+        if suppress_redundant_attachment_ack and not inferred_media_paths:
+            logger.debug(
+                f"Trace {trace_id} redundant attachment ack suppressed, "
+                "skip outbound message object"
+            )
+            return None
+
+        if final_streamed and not inferred_media_paths:
             logger.debug(f"Trace {trace_id} final response already streamed, skip outbound message object")
             return None
 
@@ -1144,13 +2109,15 @@ Respond with valid JSON only."""
             f"Trace {trace_id} outbound payload prepared channel={msg.channel} chat_id={msg.chat_id} "
             f"content_chars={len(final_content or '')} metadata_keys={sorted(out_metadata.keys())} "
             f"context_source={out_metadata.get('_context_source')} "
-            f"context_mode={out_metadata.get('_context_mode')}"
+            f"context_mode={out_metadata.get('_context_mode')} "
+            f"media={len(inferred_media_paths)}"
         )
 
         outbound = OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
+            media=inferred_media_paths,
             metadata=out_metadata,  # Preserve passthrough metadata and add timing/context stats
         )
 

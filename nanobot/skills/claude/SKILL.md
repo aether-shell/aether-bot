@@ -1,6 +1,6 @@
 ---
 name: claude
-description: Run Claude Code CLI in non-interactive mode (print/json), with safe defaults and optional tmux fallback.
+description: Run Claude Code CLI in non-interactive mode (print/json), with safe defaults and optional tmux fallback. Use when the user asks to run Claude for execution, analysis, or automation tasks.
 metadata: {"nanobot":{"emoji":"🧠","os":["darwin","linux"],"requires":{"bins":["claude","tmux"]},"aliases":["claude-code","anthropic-claude"],"triggers":["claude","claude code","anthropic claude","use claude","run claude cli","claude runner","用claude","调用claude","claude执行"],"allowed_tools":["claude","exec","read_file","list_dir"]}}
 ---
 

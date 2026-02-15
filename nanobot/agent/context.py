@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import mimetypes
 import platform
 import re
@@ -91,6 +92,27 @@ class ContextBuilder:
             parts.append(memory_section)
             section_stats.append(("memory", len(memory_section)))
 
+        # Auto-recalled learnings for project dependencies
+        auto_recall = self._detect_project_learnings()
+        if auto_recall:
+            recall_parts = []
+            learnings_dir = self.workspace / "memory" / "learnings"
+            for name in auto_recall:
+                lf = learnings_dir / f"{name}.md"
+                if lf.exists():
+                    content = self.skills._strip_frontmatter(lf.read_text("utf-8"))
+                    if len(content) > 2000:
+                        content = content[:2000] + "\n...(truncated)"
+                    recall_parts.append(f"### {name}\n{content}")
+            if recall_parts:
+                section = (
+                    "# Auto-Recalled Knowledge\n\n"
+                    "Project dependencies matched saved knowledge:\n\n"
+                    + "\n\n---\n\n".join(recall_parts)
+                )
+                parts.append(section)
+                section_stats.append(("auto_recall", len(section)))
+
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
@@ -177,18 +199,69 @@ Your workspace is at: {workspace_path}
 - Long-term memory: {workspace_path}/memory/MEMORY.md
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+- Knowledge base: {workspace_path}/memory/learnings/ (use learn/recall skills)
 
 IMPORTANT:
 - For casual conversation that does not need external data or a skill workflow, reply directly with text.
 - When the request matches a skill workflow or depends on real-time/external facts, call relevant tools first and ground your answer in tool results.
-- Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-
-Feishu support: when asked to send files or images, use the 'message' tool with the `media` field.
-This supports local file paths or URLs and will send real attachments.
+- Use the 'message' tool when the user asks you to deliver files or images as real attachments.
+- For attachment delivery, set the `media` field to local file paths or URLs and include a short text in `content`.
+- Do not claim attachment sending is unsupported unless a tool call actually fails with an explicit error.
 
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+    def _detect_project_learnings(self) -> list[str]:
+        """Detect project dependencies matching saved learnings."""
+        learnings_dir = self.workspace / "memory" / "learnings"
+        if not learnings_dir.exists():
+            return []
+        available = {
+            f.stem.lower(): f.stem
+            for f in learnings_dir.glob("*.md")
+            if not f.name.startswith(".")
+        }
+        if not available:
+            return []
+
+        deps: set[str] = set()
+        # Scan package.json
+        pkg = self.workspace / "package.json"
+        if pkg.exists():
+            try:
+                data = json.loads(pkg.read_text("utf-8"))
+                for key in ("dependencies", "devDependencies"):
+                    if isinstance(data.get(key), dict):
+                        deps.update(data[key].keys())
+            except Exception:
+                pass
+        # Scan requirements.txt
+        req = self.workspace / "requirements.txt"
+        if req.exists():
+            try:
+                for line in req.read_text("utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        deps.add(line.split("==")[0].split(">=")[0].split("[")[0].strip())
+            except Exception:
+                pass
+        # Scan pyproject.toml (simple extraction)
+        pyproject = self.workspace / "pyproject.toml"
+        if pyproject.exists():
+            try:
+                content = pyproject.read_text("utf-8")
+                for m in re.findall(r'"([a-zA-Z0-9_-]+)(?:[>=<\[].*?)?"', content):
+                    deps.add(m)
+            except Exception:
+                pass
+
+        matched = []
+        for dep in deps:
+            slug = dep.lower().replace("_", "-").replace("@", "").replace("/", "-")
+            if slug in available:
+                matched.append(available[slug])
+        return matched[:5]
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         t_start = time.monotonic()
@@ -286,6 +359,15 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
                 system_prompt += (
                     f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
                 )
+                if channel == "web":
+                    system_prompt += (
+                        "\n\n## Web Channel Capabilities\n"
+                        "- Attachment delivery is supported in this chat.\n"
+                        "- When the user asks to send a file/image/document as a file, use the "
+                        "`message` tool with `media` paths/URLs.\n"
+                        "- Prefer sending the actual attachment instead of pasting full file "
+                        "contents unless the user explicitly asks for inline text."
+                    )
             if summary:
                 system_prompt += f"\n\n## Conversation Summary\n{summary}"
             system_chars = len(system_prompt)

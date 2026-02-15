@@ -44,6 +44,51 @@ Match the level of specificity to the task's fragility and variability:
 
 Think of the agent as exploring a path: a narrow bridge with cliffs needs specific guardrails (low freedom), while an open field allows many routes (high freedom).
 
+## Built-in Reference Patterns (recall + deep-learn)
+
+When creating or updating skills in this repository, align with these proven built-in patterns:
+
+### Pattern A: Recall-style retrieval skill (`recall`)
+
+- **Intent coverage**: include both explicit commands and natural phrasing in `metadata.nanobot.triggers`.
+  - Explicit: `recall`, `recall knowledge`, `知识召回`
+  - Conversational: `回顾一下`, `之前学过`, `what did we learn`
+- **Minimal tool surface**: keep `allowed_tools` narrow (`read_file`, `list_dir`, `exec`).
+- **Deterministic retrieval order**:
+  1. exact slug match (`read_file memory/learnings/<slug>.md`)
+  2. partial filename match (`list_dir memory/learnings/`)
+  3. content grep (`exec grep -ril ... memory/learnings/`)
+- **Freshness rule**: if `last_verified` is stale, mention possible staleness and update metadata when corrected.
+
+### Pattern B: Deep research skill (`deep-learn`)
+
+- **Workflow metadata required for strict execution**:
+  - `workflow.kickoff.require_substantive_action=true`
+  - `workflow.kickoff.substantive_tools` should include real work tools (e.g. `web_search`, `web_fetch`, `write_file`, `spawn`)
+  - `workflow.completion.require_tool_calls` should enforce durable save via `write_file` path regex
+  - `workflow.retry` should declare retry count and failure mode
+  - `workflow.progress.milestones.templates` should be user-readable and stage-based
+- **Execution truthfulness**: if the assistant claims execution has started, it must perform substantive tool actions in the same turn.
+- **Durable output contract**: always persist final synthesis to `memory/learnings/<slug>.md` before claiming completion.
+
+### Knowledge Path Consistency
+
+- For knowledge lifecycle skills (`learn`, `deep-learn`, `recall`, `forget`), always use **workspace-relative** paths:
+  - `memory/learnings/...`
+- Avoid absolute host paths in skill instructions.
+- If completion is enforced, use path regex anchored at `^memory/learnings/`.
+
+## Skill Consistency Audit Checklist
+
+When auditing existing skills, check and patch these items:
+
+1. `description` clearly states "Use when ..." with concrete user intent.
+2. `triggers` cover realistic phrasing (including Chinese if the skill serves Chinese prompts).
+3. `allowed_tools` are minimal and match the workflow (least privilege).
+4. If the skill requires multi-step/tool-verified execution, define `workflow` metadata.
+5. Body examples and path conventions match actual runtime behavior (workspace-relative paths).
+6. Destructive actions (delete/reset) require explicit confirmation in instructions.
+
 ### Anatomy of a Skill
 
 Every skill consists of a required SKILL.md file and optional bundled resources:
@@ -386,6 +431,22 @@ Validation checks:
 - optional `tags` / `categories` non-empty string-list shape
 
 Fix validation errors before packaging.
+
+### Step 5.5: Run Consistency Audit
+
+After metadata validation, run the consistency audit to catch higher-level drift (intent wording, trigger breadth, workflow/path conventions):
+
+```bash
+python3 scripts/audit_skills_consistency.py --skills-root ../
+```
+
+Machine-readable output:
+
+```bash
+python3 scripts/audit_skills_consistency.py --skills-root ../ --json
+```
+
+Treat audit **errors** as blockers. Resolve warnings or document why a warning is acceptable.
 
 ### Step 6: Packaging a Skill
 
