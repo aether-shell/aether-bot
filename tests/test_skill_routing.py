@@ -183,3 +183,32 @@ def test_context_manager_routes_and_exposes_matched_skills(tmp_path: Path) -> No
     system_text = bundle.messages[0]["content"]
     assert "# Requested Skills (Current Turn)" in system_text
     assert "### Skill: weather" in system_text
+
+
+def test_web_session_prompt_explicitly_allows_attachments(tmp_path: Path) -> None:
+    workspace = _init_workspace(tmp_path)
+    provider = _NoopProvider()
+    builder = ContextBuilder(workspace)
+    builder.skills = SkillsLoader(workspace, builtin_skills_dir=workspace / "_builtin_skills")
+    manager = ContextManager(
+        provider=provider,
+        config=ContextConfig(enable_native_session=False),
+        builder=builder,
+        default_model="test-model",
+    )
+    session = Session(key="web:test_chat")
+
+    bundle = asyncio.run(
+        manager.build_context(
+            session=session,
+            current_message="Please send the document as a file.",
+            media=None,
+            channel="web",
+            chat_id="test_chat",
+        )
+    )
+
+    system_text = bundle.messages[0]["content"]
+    assert "## Web Channel Capabilities" in system_text
+    assert "Attachment delivery is supported in this chat." in system_text
+    assert "use the `message` tool with `media` paths/URLs." in system_text

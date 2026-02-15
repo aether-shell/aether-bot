@@ -30,3 +30,17 @@ Write important facts immediately using `edit_file` or `write_file`:
 ## Auto-consolidation
 
 Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+
+## Knowledge Capture
+
+After performing substantial web research (multiple web_search + web_fetch calls), evaluate whether findings are worth persisting as learned knowledge in memory/learnings/.
+
+**Decision levels:**
+1. **Auto-save**: Verified, reusable knowledge (API signatures, patterns, gotchas). Save silently.
+2. **Ask user**: Potentially valuable but uncertain. Ask: "Save this to knowledge base?"
+3. **Skip**: Routine, task-specific, or already known. Do nothing.
+
+**Guidelines:**
+- Prefer saving generalizable knowledge over task-specific debugging output.
+- Check if a learning on this topic already exists in memory/learnings/ — update rather than duplicate.
+- Use the learn skill's file format (YAML frontmatter + standard sections).

@@ -6,19 +6,22 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ContextConfig, ExecToolConfig
+    from nanobot.config.schema import ContextConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
     ExecToolConfigT = ExecToolConfig
     ContextConfigT = ContextConfig
+    WebSearchConfigT = WebSearchConfig
 else:
     ExecToolConfigT = Any
     ContextConfigT = Any
+    WebSearchConfigT = Any
 
 from loguru import logger
 
@@ -38,6 +41,56 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+
+_REALTIME_QUERY_HINTS = re.compile(
+    (
+        r"(今天|今日|最新|刚刚|实时|新闻|头条|突发|当下|现在|目前|"
+        r"搜索|查一下|查一查|查查|链接|来源|source|sources?|"
+        r"today|latest|breaking|news|headline|current|now|live|price|quote|score|schedule)"
+    ),
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_REQUEST_HINTS = re.compile(
+    (
+        r"(作为文件|发文件|发送文件|附件|把.*文件发给我|发给我.*文件|上传文件|"
+        r"send (?:me )?(?:the )?(?:file|document)|"
+        r"(?:send|share) .* as (?:a )?(?:file|attachment)|"
+        r"attachment|attach(?:ed|ment)?)"
+    ),
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_SENT_CLAIMS = re.compile(
+    r"(已发|已发送|发你了|附件就是|sent|attached|uploaded)",
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_ACK_HINTS = re.compile(
+    r"(查收|已发|已发送|发你了|sent|attached|uploaded)",
+    re.IGNORECASE,
+)
+
+_ATTACHMENT_FILE_TOKEN = re.compile(
+    (
+        r"(?<![\w/.-])"
+        r"([A-Za-z0-9_./-]+\.(?:md|txt|pdf|docx?|csv|xlsx?|xls|zip|json|png|jpe?g|gif|webp))"
+        r"(?![\w/.-])"
+    ),
+    re.IGNORECASE,
+)
+
+_TRANSIENT_MEMORY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b[A-Z][A-Z0-9_]*_API_KEY\b.*\bnot configured\b", re.IGNORECASE),
+    re.compile(r"\bBRAVE_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bTAVILY_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bSEARXNG_BASE_URL\b", re.IGNORECASE),
+    re.compile(r"\bOPENAI_API_KEY\b", re.IGNORECASE),
+    re.compile(r"\bnot configured\b", re.IGNORECASE),
+    re.compile(r"\bcannot (?:access|reach) internet\b", re.IGNORECASE),
+    re.compile(r"\bnetwork (?:error|timeout|unavailable)\b", re.IGNORECASE),
+    re.compile(r"\bweb_search failed\b", re.IGNORECASE),
+)
 
 
 class _StreamState:
@@ -111,6 +164,7 @@ class AgentLoop:
         max_tokens: int = 4096,
         memory_window: int = 50,
         brave_api_key: str | None = None,
+        web_search_config: WebSearchConfigT | None = None,
         exec_config: ExecToolConfigT | None = None,
         cron_service: "CronService" | None = None,
         stream: bool = False,
@@ -130,6 +184,7 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
+        self.web_search_config = web_search_config
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.stream = stream
@@ -156,6 +211,7 @@ class AgentLoop:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
+            web_search_config=web_search_config,
             exec_config=self.exec_config,
             restrict_to_workspace=self.restrict_to_workspace,
         )
@@ -180,7 +236,12 @@ class AgentLoop:
         ))
 
         # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+        self.tools.register(
+            WebSearchTool.from_config(
+                self.web_search_config,
+                legacy_brave_api_key=self.brave_api_key,
+            )
+        )
         self.tools.register(WebFetchTool())
 
         # Claude tool (Claude Code runner wrapper)
@@ -280,9 +341,169 @@ class AgentLoop:
         return False
 
     @staticmethod
+    def _is_realtime_query(message: str) -> bool:
+        """Heuristic: whether the prompt likely needs live verification."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_REALTIME_QUERY_HINTS.search(text))
+
+    @staticmethod
+    def _is_attachment_delivery_request(message: str) -> bool:
+        """Heuristic: whether the user is asking to deliver a real file attachment."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_ATTACHMENT_REQUEST_HINTS.search(text))
+
+    @staticmethod
+    def _claims_attachment_sent(message: str) -> bool:
+        """Heuristic: whether assistant text claims a file was already sent."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        return bool(_ATTACHMENT_SENT_CLAIMS.search(text))
+
+    @staticmethod
+    def _is_redundant_attachment_ack(message: str) -> bool:
+        """Whether a short follow-up message is only a duplicate attachment ack."""
+        text = (message or "").strip()
+        if not text:
+            return False
+        if len(text) > 80:
+            return False
+        if not AgentLoop._claims_attachment_sent(text):
+            return False
+        if _ATTACHMENT_FILE_TOKEN.search(text):
+            return False
+        return bool(_ATTACHMENT_ACK_HINTS.search(text))
+
+    @staticmethod
+    def _extract_attachment_candidates(*texts: str) -> list[str]:
+        """Extract likely file/path tokens from free text."""
+        candidates: list[str] = []
+        for text in texts:
+            value = str(text or "")
+            if not value:
+                continue
+
+            # Quoted/backticked segments often contain exact paths.
+            for pattern in (r"`([^`]+)`", r'"([^"]+)"', r"'([^']+)'"):
+                for match in re.finditer(pattern, value):
+                    token = (match.group(1) or "").strip()
+                    if token:
+                        candidates.append(token)
+
+            # Bare file-like tokens.
+            for match in _ATTACHMENT_FILE_TOKEN.finditer(value):
+                token = (match.group(1) or "").strip()
+                if token:
+                    candidates.append(token)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            key = item.strip()
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        return deduped
+
+    def _resolve_attachment_candidate(self, candidate: str) -> str | None:
+        """Resolve a candidate file token to an existing local file path."""
+        raw = (candidate or "").strip().strip("`'\"").strip()
+        if not raw:
+            return None
+
+        token_path = Path(raw).expanduser()
+        checks: list[Path] = []
+        if token_path.is_absolute():
+            checks.append(token_path)
+        else:
+            checks.append((self.workspace / token_path).resolve())
+            checks.append((self.workspace / "memory" / "learnings" / token_path.name).resolve())
+            checks.append((self.workspace / "memory" / token_path.name).resolve())
+            checks.append((self.workspace / token_path.name).resolve())
+
+        for path in checks:
+            try:
+                if path.exists() and path.is_file():
+                    return str(path)
+            except OSError:
+                continue
+        return None
+
+    def _infer_attachment_media_paths(
+        self,
+        user_content: str,
+        assistant_content: str,
+        max_items: int = 3,
+    ) -> list[str]:
+        """Infer existing local file paths from user/assistant text."""
+        resolved: list[str] = []
+        for candidate in self._extract_attachment_candidates(user_content, assistant_content):
+            path_str = self._resolve_attachment_candidate(candidate)
+            if not path_str:
+                continue
+            if path_str in resolved:
+                continue
+            resolved.append(path_str)
+            if len(resolved) >= max_items:
+                break
+        return resolved
+
+    @staticmethod
+    def _contains_transient_memory_issue(text: str) -> bool:
+        value = (text or "").strip()
+        if not value:
+            return False
+        return any(pattern.search(value) for pattern in _TRANSIENT_MEMORY_PATTERNS)
+
+    def _sanitize_history_entry(self, entry: str) -> str:
+        """
+        Remove transient environment failures from history summaries.
+
+        Keeps stable user intent/preferences while dropping volatile runtime errors.
+        """
+        text = (entry or "").strip()
+        if not text:
+            return ""
+        parts = [
+            segment.strip()
+            for segment in re.split(r"(?<=[。！？.!?])\s+", text)
+            if segment.strip()
+        ]
+        kept = [segment for segment in parts if not self._contains_transient_memory_issue(segment)]
+        return " ".join(kept).strip()
+
+    def _sanitize_memory_update(self, memory_update: str) -> str:
+        """Drop volatile environment diagnostics from MEMORY.md updates."""
+        text = (memory_update or "").strip()
+        if not text:
+            return ""
+        kept_lines: list[str] = []
+        for line in text.splitlines():
+            if self._contains_transient_memory_issue(line):
+                continue
+            kept_lines.append(line)
+        cleaned = "\n".join(kept_lines).strip()
+        return cleaned
+
+    @staticmethod
     def _hash_text(value: str) -> str:
         """Return a short stable hash for potentially large text blobs."""
         return hashlib.sha1((value or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    @staticmethod
+    def _canonical_tool_arguments(arguments: Any) -> str:
+        """Return a stable, comparable representation for tool arguments."""
+        try:
+            return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(arguments)
 
     def _schedule_memory_consolidation(self, session: Session, archive_all: bool = False) -> None:
         """
@@ -409,10 +630,24 @@ Respond with valid JSON only."""
             history_entry = str(payload.get("history_entry") or "").strip()
             memory_update = str(payload.get("memory_update") or "").strip()
 
-            if history_entry:
-                memory.append_history(history_entry)
-            if memory_update and memory_update != current_memory.strip():
-                memory.write_long_term(memory_update)
+            sanitized_history_entry = self._sanitize_history_entry(history_entry)
+            sanitized_memory_update = self._sanitize_memory_update(memory_update)
+            if not sanitized_memory_update:
+                sanitized_memory_update = current_memory.strip()
+
+            if sanitized_history_entry:
+                memory.append_history(sanitized_history_entry)
+            elif history_entry:
+                logger.debug(
+                    f"Memory consolidation dropped transient history entry key={session.key}"
+                )
+
+            if sanitized_memory_update and sanitized_memory_update != current_memory.strip():
+                memory.write_long_term(sanitized_memory_update)
+            elif memory_update and sanitized_memory_update != memory_update:
+                logger.debug(
+                    f"Memory consolidation sanitized transient memory_update key={session.key}"
+                )
 
             if not archive_all:
                 session.last_consolidated = max(0, total_messages - keep_count)
@@ -433,6 +668,7 @@ Respond with valid JSON only."""
         self,
         matched_skills: list[str],
         has_tool_results: bool = False,
+        force_realtime_tools: bool = False,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         Select visible tools and tool-choice policy for this iteration.
@@ -442,8 +678,23 @@ Respond with valid JSON only."""
         - Matched skills without tool results yet: enforce one tool call (tool_choice=required).
         - After at least one tool result exists: switch back to auto so the model can finalize.
         - If skills provide metadata.nanobot.allowed_tools, restrict tool set.
+        - Realtime queries without tool results: force one web tool call first.
         """
         all_tools = self.tools.get_definitions()
+        if force_realtime_tools and not has_tool_results:
+            realtime_tools = [
+                schema
+                for schema in all_tools
+                if self._tool_schema_name(schema) in {"web_search", "web_fetch"}
+            ]
+            if realtime_tools:
+                return realtime_tools, "required"
+            logger.warning(
+                "Realtime-tool enforcement active but web tools missing; "
+                "falling back to full toolset with required tool call."
+            )
+            return all_tools, ("required" if all_tools else None)
+
         if not matched_skills:
             return all_tools, ("auto" if all_tools else None)
 
@@ -704,8 +955,12 @@ Respond with valid JSON only."""
             skill for skill in (ctx_stats.get("matched_skills") or [])
             if isinstance(skill, str) and skill
         ]
+        force_realtime_tools = self._is_realtime_query(msg.content)
+        attachment_requested = self._is_attachment_delivery_request(msg.content)
         tool_round_limited_skills = self.context.skills.get_tool_round_limited_skills(matched_skills)
         skill_enforcement_attempted = False
+        realtime_enforcement_attempted = False
+        web_search_result_cache: dict[str, str] = {}
         raw_skill_tool_round_limit = int(getattr(self.context_config, "skill_tool_round_limit", 0) or 0)
         skill_tool_round_limit = max(0, raw_skill_tool_round_limit)
         if not tool_round_limited_skills:
@@ -721,12 +976,19 @@ Respond with valid JSON only."""
                 f"tool_round_limited_skills={tool_round_limited_skills} "
                 f"round_limit={skill_tool_round_limit} stagnation_limit={stagnation_limit}"
             )
+        logger.debug(
+            f"Trace {trace_id} realtime_tool_enforcement={force_realtime_tools} "
+            f"attachment_requested={attachment_requested} "
+            f"matched_skills={matched_skills}"
+        )
 
         # Native session recovery: if first LLM call in native mode fails,
         # clear stale previous_response_id and retry with full context (reset mode).
         if native_mode:
             probe_tools, probe_tool_choice = self._select_iteration_tools(
-                matched_skills, has_tool_results=False
+                matched_skills,
+                has_tool_results=False,
+                force_realtime_tools=force_realtime_tools,
             )
             probe_tool_names = [
                 (tool.get("function", {}) or {}).get("name") or tool.get("name") or "unknown"
@@ -793,9 +1055,19 @@ Respond with valid JSON only."""
                     messages = []
                     for tool_call in first_response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        args_signature = self._canonical_tool_arguments(tool_call.arguments)
                         logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                         t_tool = time.monotonic()
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        if tool_call.name == "web_search" and args_signature in web_search_result_cache:
+                            result = web_search_result_cache[args_signature]
+                            logger.debug(
+                                f"Trace {trace_id} native probe tool=web_search "
+                                "dedupe_hit=True reused previous result"
+                            )
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                            if tool_call.name == "web_search":
+                                web_search_result_cache[args_signature] = result
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
                         )
@@ -817,8 +1089,25 @@ Respond with valid JSON only."""
                             )
                             iteration = self.max_iterations
                 else:
-                    final_content = first_response.content
-                    iteration = self.max_iterations  # Skip main loop
+                    if force_realtime_tools:
+                        realtime_enforcement_attempted = True
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Realtime verification retry. Call web_search first "
+                                    "(and web_fetch if needed), then answer with links."
+                                ),
+                            }
+                        ]
+                        iteration = 1  # Count native probe call
+                        logger.debug(
+                            f"Trace {trace_id} native probe had no tool calls for realtime query; "
+                            "queued explicit realtime retry"
+                        )
+                    else:
+                        final_content = first_response.content
+                        iteration = self.max_iterations  # Skip main loop
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -832,7 +1121,9 @@ Respond with valid JSON only."""
                 on_delta = stream_state.on_delta
 
             iter_tools, iter_tool_choice = self._select_iteration_tools(
-                matched_skills, has_tool_results=self._has_tool_messages(messages)
+                matched_skills,
+                has_tool_results=self._has_tool_messages(messages),
+                force_realtime_tools=force_realtime_tools,
             )
             iter_tool_names = [
                 (tool.get("function", {}) or {}).get("name") or tool.get("name") or "unknown"
@@ -896,18 +1187,22 @@ Respond with valid JSON only."""
                         session_state = {"previous_response_id": response.response_id}
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    args_signature = self._canonical_tool_arguments(tool_call.arguments)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     t_tool = time.monotonic()
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if tool_call.name == "web_search" and args_signature in web_search_result_cache:
+                        result = web_search_result_cache[args_signature]
+                        logger.debug(
+                            f"Trace {trace_id} iteration={iteration} tool=web_search "
+                            "dedupe_hit=True reused previous result"
+                        )
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        if tool_call.name == "web_search":
+                            web_search_result_cache[args_signature] = result
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
-                    try:
-                        args_signature = json.dumps(
-                            tool_call.arguments, ensure_ascii=False, sort_keys=True
-                        )
-                    except Exception:
-                        args_signature = str(tool_call.arguments)
                     round_signatures.append(
                         f"{tool_call.name}:{args_signature}:{self._hash_text(result)}"
                     )
@@ -993,6 +1288,46 @@ Respond with valid JSON only."""
                         ]
                     continue
 
+                if (
+                    force_realtime_tools
+                    and not realtime_enforcement_attempted
+                    and not self._has_tool_messages(messages)
+                    and stream_state is None
+                ):
+                    realtime_enforcement_attempted = True
+                    logger.debug(
+                        f"Trace {trace_id} iteration={iteration} realtime query had no tool calls; "
+                        "enforcing one retry with explicit web_search requirement"
+                    )
+                    if not native_mode:
+                        messages = self.context.add_assistant_message(
+                            messages,
+                            response.content,
+                            reasoning_content=response.reasoning_content,
+                        )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Realtime verification retry: this request needs up-to-date, "
+                                    "source-backed facts. Before finalizing your answer, call "
+                                    "web_search first (and web_fetch if needed), then answer "
+                                    "based on tool results with links."
+                                ),
+                            }
+                        )
+                    else:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Realtime verification retry. Call web_search first "
+                                    "(and web_fetch if needed), then answer with links."
+                                ),
+                            }
+                        ]
+                    continue
+
                 final_content = response.content
                 if stream_state:
                     final_streamed = stream_state.sent_any
@@ -1066,15 +1401,57 @@ Respond with valid JSON only."""
         # Persist any messages the agent sent via the message tool (e.g. file
         # attachments) as separate assistant entries so that catchUpMessages /
         # session reload on the web frontend can re-render them.
+        delivered_media_paths: list[str] = []
+        sent_message_count = 0
         _msg_tool = self.tools.get("message")
         if isinstance(_msg_tool, MessageTool):
             for sent in _msg_tool.drain_sent_messages():
+                sent_message_count += 1
                 kwargs: dict[str, Any] = {}
-                if sent.get("media"):
-                    kwargs["media"] = sent["media"]
+                media_items = [str(p) for p in (sent.get("media") or []) if str(p).strip()]
+                if media_items:
+                    kwargs["media"] = media_items
+                    for item in media_items:
+                        if item not in delivered_media_paths:
+                            delivered_media_paths.append(item)
                 session.add_message("assistant", sent["content"], **kwargs)
-        if final_content:
-            session.add_message("assistant", final_content)
+
+        inferred_media_paths: list[str] = []
+        if attachment_requested and not delivered_media_paths:
+            inferred_media_paths = self._infer_attachment_media_paths(msg.content, final_content or "")
+            if inferred_media_paths:
+                delivered_media_paths.extend(inferred_media_paths)
+                logger.warning(
+                    f"Trace {trace_id} attachment fallback inferred media paths: "
+                    f"{[Path(p).name for p in inferred_media_paths]}"
+                )
+            elif self._claims_attachment_sent(final_content or ""):
+                final_content = (
+                    "我这次还没有真正发出附件（消息里没有携带 `media`）。"
+                    "请再给我一次文件路径，或直接确认要发送的文件名。"
+                )
+                logger.warning(
+                    f"Trace {trace_id} attachment claim detected without media; "
+                    "rewrote final response to explicit failure"
+                )
+
+        suppress_redundant_attachment_ack = (
+            attachment_requested
+            and sent_message_count > 0
+            and bool(delivered_media_paths)
+            and self._is_redundant_attachment_ack(final_content or "")
+        )
+        if suppress_redundant_attachment_ack:
+            logger.debug(
+                f"Trace {trace_id} suppressing redundant attachment follow-up "
+                f"after message tool delivery content_preview={self._preview_text(final_content or '')}"
+            )
+
+        if final_content and not suppress_redundant_attachment_ack:
+            kwargs: dict[str, Any] = {}
+            if inferred_media_paths:
+                kwargs["media"] = inferred_media_paths
+            session.add_message("assistant", final_content, **kwargs)
         self.sessions.save(session)
         save_time = time.monotonic() - t_save
         logger.debug(
@@ -1105,7 +1482,14 @@ Respond with valid JSON only."""
         else:
             logger.debug(log_line)
 
-        if final_streamed:
+        if suppress_redundant_attachment_ack and not inferred_media_paths:
+            logger.debug(
+                f"Trace {trace_id} redundant attachment ack suppressed, "
+                "skip outbound message object"
+            )
+            return None
+
+        if final_streamed and not inferred_media_paths:
             logger.debug(f"Trace {trace_id} final response already streamed, skip outbound message object")
             return None
 
@@ -1144,13 +1528,15 @@ Respond with valid JSON only."""
             f"Trace {trace_id} outbound payload prepared channel={msg.channel} chat_id={msg.chat_id} "
             f"content_chars={len(final_content or '')} metadata_keys={sorted(out_metadata.keys())} "
             f"context_source={out_metadata.get('_context_source')} "
-            f"context_mode={out_metadata.get('_context_mode')}"
+            f"context_mode={out_metadata.get('_context_mode')} "
+            f"media={len(inferred_media_paths)}"
         )
 
         outbound = OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
+            media=inferred_media_paths,
             metadata=out_metadata,  # Preserve passthrough metadata and add timing/context stats
         )
 
