@@ -9,8 +9,9 @@
 
 [English](README.md) | 中文
 
-> 说明：本 README 描述的是项目的终极目标与设计规范，当前实现仍在逐步落地中。
-> 截至 2026-02-10，Phase 1a 完成度约 25%-35%（以内部进度记录为准）。
+> 说明：本 README 同时包含长期目标设计与仓库当前状态。
+> `aetherctl` 控制面包已在 2026-02-16 移除。
+> 当前可运行的 CLI 为 `nanobot`；孵化/裁决/晋升流程仍属于目标设计。
 
 ## 0) 愿景与宣言
 
@@ -153,31 +154,26 @@ Judge 对 `required_evidence` 执行 **fail-closed** 校验，缺失即拒绝。
 - Judge/Promoter/Gate 规则变更 -> High
 - 安全相关改动 -> High
 
-## 8) CLI 目标接口（Phase 1a）
+## 8) 当前 CLI
 
 ```bash
-aether incubate <branch> [--risk low|medium|high] [--type feature|bugfix|dependency|upstream|refactor]
-aether status <incubation-id>
-aether judge <incubation-id>
-aether promote <incubation-id>
-aether rollback <incubation-id>            # Phase 1b+
-aether artifacts <incubation-id>
-aether baseline [--update]
+nanobot --help
+nanobot onboard
+nanobot agent -m "Hello"
+nanobot status
+nanobot gateway
+nanobot channels --help
+nanobot cron --help
 ```
 
-**退出码规范：**
-- `0` 成功
-- `1` 孵化流程执行失败
-- `2` Judge reject
-- `3` 参数/配置错误
-- `4` 并发冲突（已有活跃孵化）
+## 9) 当前实现技术栈
 
-## 9) 实现技术栈（Phase 1a 目标）
-
-- **TypeScript + Node.js**：JSON Schema 生态成熟，便于严格证据校验
-- **AJV**：高性能 JSON Schema 校验器
-- **pnpm**：锁定依赖，确保可复现构建
-- **Dogfooding**：用以太躯壳管理自身仓库的升级流程
+- **Python 3.11+**：Agent、网关、调度等主运行时
+- **Typer**：CLI 与命令分组框架
+- **Pydantic / pydantic-settings**：配置模型与校验
+- **LiteLLM**：模型提供方抽象层
+- **pytest + Ruff**：测试与静态检查基线
+- **MCP（Python）**：工具与服务集成支持
 
 ## 10) Agent 启动架构
 
@@ -223,19 +219,19 @@ Agent 的 system prompt 由三条独立加载通道组装而成：
 
 ## 11) 阶段路线图
 
-- **Phase 1a（可用）**
-  - `develop` 作为回归分身
-  - 完整孵化 + 人工晋升 `main`
+- **近期**
+  - 稳定 `nanobot` CLI、多渠道适配与 cron 可靠性
+  - 持续强化配置与运行时护栏
 
-- **Phase 1b（增强）**
-  - Docker twin + canary + manifest 签名
-  - 自动回滚
+- **中期**
+  - 以独立控制面切片方式重新引入孵化/裁决/晋升自动化
+  - 增加产物签名与回滚编排
 
-- **Phase 2（强化）**
+- **长期**
   - 影子流量 / 请求回放
   - 更严格的性能/稳定性门槛
 
-- **Phase 3（自驱）**
+- **未来自驱闭环**
   - 多分身并行竞赛
   - 优胜晋升，形成闭环自我进化
 
@@ -286,4 +282,4 @@ Web 渠道使用与 Cloudflare Tunnel 接入说明：
 
 ---
 
-如果你想参与落地 Phase 1a 的垂直切片（证据链 + Judge + Promote），欢迎一起推进。
+如果你想一起推进运行时可靠性与下一阶段控制面能力，欢迎一起共建。

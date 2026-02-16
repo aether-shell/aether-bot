@@ -9,6 +9,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 import httpx
+import json_repair
 import litellm
 from litellm import acompletion, aresponses
 from loguru import logger
@@ -152,6 +153,7 @@ class LiteLLMProvider(LLMProvider):
         """
         t_start = time.monotonic()
         model = model or self.default_model
+        max_tokens = max(1, max_tokens)
         use_responses = self._use_responses_api()
         logger.debug(
             f"LiteLLM chat start model={model} mode={'responses' if use_responses else 'completions'} "
@@ -766,8 +768,8 @@ class LiteLLMProvider(LLMProvider):
                             continue
                         if isinstance(args, str):
                             try:
-                                parsed_args = json.loads(args)
-                            except json.JSONDecodeError:
+                                parsed_args = json_repair.loads(args)
+                            except Exception:
                                 parsed_args = {"raw": args}
                         else:
                             parsed_args = args
@@ -815,8 +817,8 @@ class LiteLLMProvider(LLMProvider):
                 args = tc.function.arguments
                 if isinstance(args, str):
                     try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
+                        args = json_repair.loads(args)
+                    except Exception:
                         args = {"raw": args}
 
                 tool_calls.append(ToolCallRequest(
@@ -905,8 +907,8 @@ class LiteLLMProvider(LLMProvider):
 
                 if isinstance(arguments, str):
                     try:
-                        parsed_args = json.loads(arguments)
-                    except json.JSONDecodeError:
+                        parsed_args = json_repair.loads(arguments)
+                    except Exception:
                         parsed_args = {"raw": arguments}
                 else:
                     parsed_args = arguments
@@ -946,6 +948,24 @@ class LiteLLMProvider(LLMProvider):
         if status and status != "completed":
             finish_reason = status
 
+        # Extract reasoning_content from output items (Responses API)
+        reasoning_content = None
+        if output_items:
+            for item in output_items:
+                item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+                if item_type == "reasoning":
+                    summary = item.get("summary") if isinstance(item, dict) else getattr(item, "summary", None)
+                    if isinstance(summary, list):
+                        parts = []
+                        for s in summary:
+                            text = s.get("text") if isinstance(s, dict) else getattr(s, "text", None)
+                            if text:
+                                parts.append(text)
+                        if parts:
+                            reasoning_content = "\n".join(parts)
+                    elif isinstance(summary, str) and summary:
+                        reasoning_content = summary
+
         parsed = LLMResponse(
             content=content,
             tool_calls=tool_calls,
@@ -954,6 +974,7 @@ class LiteLLMProvider(LLMProvider):
             response_id=response_id,
             conversation_id=conversation_id,
             model=model,
+            reasoning_content=reasoning_content,
         )
         content_preview = self._preview_text(parsed.content)
         logger.debug(

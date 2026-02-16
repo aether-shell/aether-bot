@@ -202,7 +202,7 @@ def main(
 @app.command()
 def onboard():
     """Initialize nanobot configuration and workspace."""
-    from nanobot.config.loader import get_config_path, save_config
+    from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
 
@@ -218,7 +218,9 @@ def onboard():
             # Keep this phrase for backward-compatible tests/output checks.
             console.print(f"[green]✓[/green] Created config at {config_path}")
         else:
-            console.print(f"[green]✓[/green] Kept existing config at {config_path}")
+            config = load_config()
+            save_config(config)
+            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
@@ -570,6 +572,7 @@ def gateway(
         context_config=config.agents.defaults.context,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
     )
 
     # Set cron callback (needs agent)
@@ -629,6 +632,7 @@ def gateway(
             console.print("\nShutting down...")
             heartbeat.stop()
             cron.stop()
+            await agent.close_mcp()
             agent.stop()
             await channels.stop_all()
 
@@ -685,6 +689,7 @@ def agent(
         stream_min_interval_s=config.agents.defaults.stream_min_interval_s,
         context_config=config.agents.defaults.context,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        mcp_servers=config.tools.mcp_servers,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -736,6 +741,7 @@ def agent(
                         continue
 
                     if _is_exit_command(command):
+                        await agent_loop.close_mcp()
                         _save_history()
                         _restore_terminal()
                         console.print("\nGoodbye!")
@@ -769,11 +775,13 @@ def agent(
                     else:
                         _print_agent_response(response, render_markdown=markdown)
                 except KeyboardInterrupt:
+                    await agent_loop.close_mcp()
                     _save_history()
                     _restore_terminal()
                     console.print("\nGoodbye!")
                     break
                 except EOFError:
+                    await agent_loop.close_mcp()
                     _save_history()
                     _restore_terminal()
                     console.print("\nGoodbye!")
