@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import json_repair
 import os
 import re
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -173,6 +175,7 @@ class AgentLoop:
         context_config: ContextConfigT | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        mcp_servers: dict | None = None,
     ):
         from nanobot.config.schema import ContextConfig, ExecToolConfig
         self.bus = bus
@@ -217,6 +220,9 @@ class AgentLoop:
         )
 
         self._running = False
+        self._mcp_servers = mcp_servers or {}
+        self._mcp_stack: AsyncExitStack | None = None
+        self._mcp_connected = False
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -258,6 +264,34 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+    async def _connect_mcp(self) -> None:
+        """Connect to configured MCP servers and register their tools."""
+        if self._mcp_connected or not self._mcp_servers:
+            return
+        self._mcp_connected = True
+        try:
+            from nanobot.agent.tools.mcp import connect_mcp_servers
+
+            self._mcp_stack = AsyncExitStack()
+            await self._mcp_stack.__aenter__()
+            mcp_tools = await connect_mcp_servers(self._mcp_servers, self._mcp_stack)
+            for t in mcp_tools:
+                self.tools.register(t)
+            if mcp_tools:
+                logger.info(f"MCP: registered {len(mcp_tools)} tools from {len(self._mcp_servers)} server(s)")
+        except Exception as e:
+            logger.error(f"MCP connection failed: {e}")
+
+    async def close_mcp(self) -> None:
+        """Shut down MCP server connections."""
+        if self._mcp_stack:
+            try:
+                await self._mcp_stack.aclose()
+            except Exception as e:
+                logger.warning(f"MCP close error: {e}")
+            self._mcp_stack = None
+        self._mcp_connected = False
 
     def _should_stream(self, channel: str) -> bool:
         if not self.stream:
@@ -1084,7 +1118,7 @@ Respond with valid JSON only."""
             raw = (result.content or "").strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            payload = json.loads(raw)
+            payload = json_repair.loads(raw)
             if not isinstance(payload, dict):
                 raise ValueError("consolidation response is not a JSON object")
 
@@ -1234,6 +1268,7 @@ Respond with valid JSON only."""
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
+        await self._connect_mcp()
         logger.info("Agent loop started")
 
         while self._running:
@@ -2395,6 +2430,7 @@ Respond with valid JSON only."""
         Returns:
             The agent's response (string) or OutboundMessage.
         """
+        await self._connect_mcp()
         t_start = time.monotonic()
         msg = InboundMessage(
             channel=channel,

@@ -9,9 +9,9 @@
 
 English (default) | [中文](README.zh-CN.md)
 
-> Note: This README describes the project's ultimate target design and specifications.
-> The implementation is still in progress.
-> As of 2026-02-10, Phase 1a is about 25-35% complete (per internal progress log).
+> Note: This README mixes long-term target design with current repository status.
+> The `aetherctl` control-plane package was removed on 2026-02-16.
+> Current runnable CLI is `nanobot`; incubation/judge/promote flow remains a target design.
 
 ## 0) Vision and Manifesto
 
@@ -156,31 +156,26 @@ Auto escalation rules:
 - Judge/Promoter/Gate rule changes -> High
 - security-related changes -> High
 
-## 8) Target CLI (Phase 1a)
+## 8) Current CLI
 
 ```bash
-aether incubate <branch> [--risk low|medium|high] [--type feature|bugfix|dependency|upstream|refactor]
-aether status <incubation-id>
-aether judge <incubation-id>
-aether promote <incubation-id>
-aether rollback <incubation-id>            # Phase 1b+
-aether artifacts <incubation-id>
-aether baseline [--update]
+nanobot --help
+nanobot onboard
+nanobot agent -m "Hello"
+nanobot status
+nanobot gateway
+nanobot channels --help
+nanobot cron --help
 ```
 
-**Exit codes:**
-- `0` success
-- `1` incubation flow failed
-- `2` judge reject
-- `3` invalid args or config
-- `4` concurrency conflict (active incubation exists)
+## 9) Current Implementation Stack
 
-## 9) Implementation Stack (Phase 1a target)
-
-- **TypeScript + Node.js**: strong JSON Schema ecosystem
-- **AJV**: high-performance schema validation
-- **pnpm**: locked dependencies for reproducible builds
-- **Dogfooding**: Aether Shell manages its own repo upgrades
+- **Python 3.11+**: primary runtime for agent, gateway, and scheduling flows
+- **Typer**: CLI and command-group framework
+- **Pydantic / pydantic-settings**: config schema and validation
+- **LiteLLM**: model-provider abstraction
+- **pytest + Ruff**: testing and linting baseline
+- **MCP (Python)**: tool and server integration support
 
 ## 10) Agent Bootstrap Architecture
 
@@ -226,19 +221,19 @@ Loaded after memory, independent of `BOOTSTRAP.md`.
 
 ## 11) Roadmap
 
-- **Phase 1a (usable)**
-  - `develop` as regression twin
-  - full incubation + manual promotion to `main`
+- **Near-term**
+  - stabilize `nanobot` CLI, channel adapters, and cron reliability
+  - continue hardening config and runtime guardrails
 
-- **Phase 1b (enhanced)**
-  - Docker twin + canary + manifest signing
-  - automatic rollback
+- **Mid-term**
+  - reintroduce incubate/judge/promote automation as a standalone control-plane slice
+  - add artifact signing and rollback orchestration
 
-- **Phase 2 (hardened)**
+- **Long-term**
   - shadow traffic / request replay
   - tighter performance and stability gates
 
-- **Phase 3 (self-driven)**
+- **Future self-driven loop**
   - multiple twins in parallel
   - best candidate promoted, closed-loop evolution
 
@@ -289,4 +284,4 @@ Upstream MIT portions remain openly licensed.
 
 ---
 
-If you want to help deliver the Phase 1a vertical slice (evidence chain + Judge + Promote), join us.
+If you want to help improve runtime reliability and ship the next control-plane slice, join us.

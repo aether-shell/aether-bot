@@ -65,19 +65,20 @@ def test_onboard_fresh_install(mock_paths):
 def test_onboard_existing_config_no_overwrite(mock_paths):
     """Test onboarding with existing config, user declines overwrite."""
     config_file, workspace_dir = mock_paths
-    
+
     # Pre-create config
     config_file.write_text('{"existing": true}')
-    
+
     # Input "n" for overwrite prompt
     result = runner.invoke(app, ["onboard"], input="n\n")
-    
+
     assert result.exit_code == 0
     assert "Config already exists" in result.stdout
-    
-    # Verify config was NOT changed
-    assert '{"existing": true}' in config_file.read_text()
-    
+
+    # Config is refreshed (load + save) to pick up new schema fields,
+    # so it won't match the original raw JSON. Verify the refresh message.
+    assert "Config refreshed" in result.stdout
+
     # Verify workspace was still created
     assert "Created workspace" in result.stdout
     assert workspace_dir.exists()

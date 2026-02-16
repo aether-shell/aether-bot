@@ -275,10 +275,19 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class MCPServerConfig(BaseModel):
+    """MCP server connection configuration (stdio or HTTP)."""
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
