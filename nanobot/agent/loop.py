@@ -1,4 +1,24 @@
-"""Agent loop: the core processing engine."""
+"""代理循环: 核心处理引擎
+
+这是nanobot的心脏，负责处理所有用户消息并生成响应。
+
+主要职责:
+1. 从消息总线消费入站消息
+2. 加载或创建会话（含历史对话）
+3. 构建LLM上下文（系统提示词 + 历史 + 当前消息）
+4. 调用LLM生成响应
+5. 执行工具调用（如有）
+6. 流式返回响应（如启用）
+7. 保存会话历史
+8. 发送最终响应到消息总线
+
+关键特性:
+- 支持流式响应（实时推送部分内容）
+- 工具调用循环（最多max_iterations次）
+- 原生会话模式（Claude的会话状态管理）
+- 性能监控（记录各阶段耗时）
+- 子代理支持（通过SpawnTool）
+"""
 
 from __future__ import annotations
 
@@ -39,6 +59,33 @@ from nanobot.session.manager import SessionManager
 
 
 class _StreamState:
+    """流式响应的状态管理器（内部类）
+
+    管理LLM流式输出的缓冲和发送逻辑，避免频繁发送小块内容。
+
+    缓冲策略:
+    - 累积到达min_chars个字符
+    - 或距离上次发送超过min_interval_s秒
+    - 满足条件之一时flush（发送）
+
+    流式响应的优势:
+    - 用户体验更好（实时看到进度）
+    - 减少等待焦虑
+    - 适合长响应
+
+    Attributes:
+        bus: 消息总线（用于发送部分响应）
+        channel: 目标渠道
+        chat_id: 目标聊天ID
+        base_metadata: 基础元数据（会附加stream标志）
+        min_chars: 最小缓冲字符数
+        min_interval_s: 最小发送间隔（秒）
+        buffer: 当前缓冲的文本
+        sent_any: 是否已发送过内容
+        last_flush: 上次发送的时间戳
+        stream_id: 流式响应的唯一ID
+    """
+
     def __init__(
         self,
         bus: MessageBus,
@@ -48,6 +95,16 @@ class _StreamState:
         min_chars: int,
         min_interval_s: float,
     ):
+        """初始化流式状态管理器
+
+        Args:
+            bus: 消息总线实例
+            channel: 目标渠道名称
+            chat_id: 目标聊天ID
+            base_metadata: 基础元数据（会被复制）
+            min_chars: 最小缓冲字符数（默认120）
+            min_interval_s: 最小发送间隔秒数（默认0.5）
+        """
         self.bus = bus
         self.channel = channel
         self.chat_id = chat_id
@@ -61,6 +118,18 @@ class _StreamState:
         self.stream_id = f"{channel}:{chat_id}:{stamp}"
 
     async def on_delta(self, delta: str) -> None:
+        """处理LLM的增量输出
+
+        每当LLM生成一小块文本时，此方法会被调用。
+        文本会被添加到缓冲区，如果满足发送条件则flush。
+
+        发送条件（满足其一）:
+        - 缓冲区字符数 >= min_chars
+        - 距离上次发送时间 >= min_interval_s
+
+        Args:
+            delta: LLM生成的文本增量
+        """
         if not delta:
             return
         self.buffer += delta
@@ -69,6 +138,14 @@ class _StreamState:
             await self.flush(final=False)
 
     async def flush(self, final: bool) -> None:
+        """发送缓冲区内容到消息总线
+
+        将当前缓冲的文本作为OutboundMessage发送，并清空缓冲区。
+        消息的metadata中会包含流式响应标志。
+
+        Args:
+            final: 是否是最后一块内容（True表示流式响应结束）
+        """
         if not self.buffer:
             return
         metadata = dict(self.base_metadata)
@@ -87,15 +164,42 @@ class _StreamState:
 
 
 class AgentLoop:
-    """
-    The agent loop is the core processing engine.
+    """代理循环 - 核心处理引擎
 
-    It:
-    1. Receives messages from the bus
-    2. Builds context with history, memory, skills
-    3. Calls the LLM
-    4. Executes tool calls
-    5. Sends responses back
+    这是nanobot的中枢神经系统，负责:
+
+    1. **消息接收**: 从MessageBus消费InboundMessage
+    2. **会话管理**: 加载或创建会话，维护对话历史
+    3. **上下文构建**: 组装系统提示词、技能、记忆、历史
+    4. **LLM调用**: 调用LLM Provider生成响应
+    5. **工具执行**: 处理工具调用请求，执行工具
+    6. **流式输出**: 实时推送部分响应（可选）
+    7. **会话保存**: 持久化对话历史
+    8. **响应发送**: 将最终响应发布到MessageBus
+
+    工具调用循环:
+    ```
+    while iteration < max_iterations:
+        response = await llm.chat(...)
+        if response.has_tool_calls:
+            for tool_call in response.tool_calls:
+                result = await tools.execute(...)
+                messages.append(tool_result)
+        else:
+            break  # 没有工具调用，返回文本响应
+    ```
+
+    原生会话模式（Native Session）:
+    - 支持Claude的会话状态管理（使用previous_response_id）
+    - 减少上下文token消耗
+    - 自动处理会话失效并回退到完整上下文模式
+
+    性能监控:
+    - 记录入站等待时间（inbound_wait）
+    - 记录上下文构建时间（context_time）
+    - 记录LLM调用时间（llm_total）
+    - 记录工具执行时间（tool_total）
+    - 记录会话保存时间（save_time）
     """
 
     def __init__(
@@ -115,6 +219,32 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
     ):
+        """初始化代理循环
+
+        设置所有核心组件:
+        - 消息总线: 用于接收和发送消息
+        - LLM提供者: 用于调用AI模型
+        - 工作空间: 存放会话、技能、记忆等
+        - 工具注册表: 管理所有可用工具
+        - 会话管理器: 持久化对话历史
+        - 子代理管理器: 创建和管理子代理
+
+        Args:
+            bus: 消息总线实例
+            provider: LLM提供者（如LiteLLMProvider）
+            workspace: 工作空间路径
+            model: 模型名称（默认使用provider的默认模型）
+            max_iterations: 工具调用的最大迭代次数（防止无限循环）
+            brave_api_key: Brave搜索API密钥（用于WebSearchTool）
+            exec_config: Shell命令执行配置（超时、环境变量等）
+            cron_service: 定时任务服务（可选）
+            stream: 是否启用流式响应
+            stream_min_chars: 流式响应的最小缓冲字符数
+            stream_min_interval_s: 流式响应的最小发送间隔（秒）
+            context_config: 上下文管理配置（窗口大小、摘要策略等）
+            restrict_to_workspace: 是否限制文件操作在工作空间内
+            session_manager: 自定义会话管理器（可选）
+        """
         from nanobot.config.schema import ContextConfig, ExecToolConfig
         self.bus = bus
         self.provider = provider
@@ -130,16 +260,17 @@ class AgentLoop:
         self.context_config = context_config or ContextConfig()
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
-        self.context_manager = ContextManager(
+        # 初始化核心组件
+        self.context = ContextBuilder(workspace)  # 上下文构建器
+        self.context_manager = ContextManager(  # 上下文管理器（处理摘要、窗口管理）
             provider=provider,
             config=self.context_config,
             builder=self.context,
             default_model=self.model,
         )
-        self.sessions = session_manager or SessionManager(workspace)
-        self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
+        self.sessions = session_manager or SessionManager(workspace)  # 会话管理器
+        self.tools = ToolRegistry()  # 工具注册表
+        self.subagents = SubagentManager(  # 子代理管理器
             provider=provider,
             workspace=workspace,
             bus=bus,
@@ -150,9 +281,23 @@ class AgentLoop:
         )
 
         self._running = False
-        self._register_default_tools()
+        self._register_default_tools()  # 注册默认工具集
 
     def _register_default_tools(self) -> None:
+        """注册默认工具集
+
+        注册7类核心工具:
+        1. **文件工具**: read_file, write_file, edit_file, list_dir
+        2. **Shell工具**: exec（执行命令）
+        3. **Web工具**: web_search, web_fetch
+        4. **Claude工具**: claude（调用Claude Code）
+        5. **消息工具**: message（发送消息到其他聊天）
+        6. **子代理工具**: spawn（创建子代理）
+        7. **定时任务工具**: cron（可选，需要cron_service）
+
+        工作空间限制:
+        如果restrict_to_workspace=True，文件工具只能访问工作空间内的文件。
+        """
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
